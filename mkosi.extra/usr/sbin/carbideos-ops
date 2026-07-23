@@ -40,6 +40,10 @@ case "$operation" in
         ;;
     reboot)
         [ "$#" -eq 0 ] || usage
+        if /usr/lib/systemd/systemd-sysupdate pending; then
+            exec /usr/bin/env -i PATH="$PATH" \
+                /usr/lib/systemd/systemd-sysupdate reboot
+        fi
         exec /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl reboot
         ;;
     poweroff)
@@ -48,8 +52,20 @@ case "$operation" in
         ;;
     update)
         [ "$#" -eq 0 ] || usage
-        exec /usr/bin/env -i PATH="$PATH" \
+        /usr/bin/env -i PATH="$PATH" \
             /usr/lib/systemd/systemd-sysupdate update
+        /usr/bin/sync
+        if /usr/lib/systemd/systemd-sysupdate pending; then
+            # shellcheck disable=SC1091
+            . /etc/os-release
+            set -- "/boot/EFI/Linux/${IMAGE_ID}_"*+*-*.efi
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+                printf '%s\n' \
+                    'Expected exactly one pending counted UKI.' >&2
+                exit 1
+            fi
+            /usr/bin/bootctl set-oneshot "$(basename "$1")"
+        fi
         ;;
     extension)
         [ "$#" -eq 2 ] || usage

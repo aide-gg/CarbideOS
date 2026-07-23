@@ -74,6 +74,24 @@ if ! grep -qx 'Mode=0600' \
     printf '%s\n' 'UKI transfer must remain root-writable for boot counting.' >&2
     exit 1
 fi
+if ! grep -Fq '/usr/bin/bootctl set-oneshot' \
+        mkosi.extra/usr/sbin/carbideos-ops || \
+   ! grep -Fqx '        /usr/bin/sync' \
+        mkosi.extra/usr/sbin/carbideos-ops || \
+   ! grep -Fq '/usr/lib/systemd/systemd-sysupdate reboot' \
+        mkosi.extra/usr/sbin/carbideos-ops; then
+    printf '%s\n' 'Operator updates must explicitly activate through sysupdate.' >&2
+    exit 1
+fi
+if ! grep -Fqx '        panic=30' mkosi.conf || \
+   ! grep -Fqx 'RuntimeWatchdogSec=60s' \
+        mkosi.extra/etc/systemd/system.conf.d/60-carbideos-watchdog.conf || \
+   ! grep -Fqx \
+        'ConditionPathExistsGlob=/sys/firmware/efi/efivars/LoaderBootCountPath-*' \
+        mkosi.extra/usr/lib/systemd/system/carbideos-counted-boot-reboot.service; then
+    printf '%s\n' 'Counted-boot retry and watchdog policy is incomplete.' >&2
+    exit 1
+fi
 
 GNUPGHOME="$verify_home" gpg --batch --import \
     "$release/release-signing.pub.asc" >/dev/null 2>&1
@@ -108,7 +126,7 @@ fi
     sha256sum --check --strict SHA256SUMS
 )
 
-for command in jq sbverify sfdisk systemd-dissect zstd; do
+for command in jq mdir sbverify sfdisk systemd-dissect zstd; do
     if ! command -v "$command" >/dev/null 2>&1 && \
        [ ! -x "/usr/sbin/$command" ]; then
         printf 'Missing required verification command: %s\n' "$command" >&2
@@ -224,6 +242,16 @@ fi
 
 esp_size=$("$sfdisk" --json "$raw" | jq -r \
     '.partitiontable as $t | ($t.partitions[0].size * $t.sectorsize)')
+esp_offset=$("$sfdisk" --json "$raw" | jq -r \
+    '.partitiontable as $t | ($t.partitions[0].start * $t.sectorsize)')
+esp_listing=$(mdir -b -i "$raw@@$esp_offset" ::/EFI/Linux)
+if ! printf '%s\n' "$esp_listing" | \
+        grep -Fqx "::/EFI/Linux/${update_prefix}_${version}.efi" || \
+   printf '%s\n' "$esp_listing" | grep -Fq '%v'; then
+    printf '%s\n' \
+        'Factory ESP does not contain the expected versioned UKI filename.' >&2
+    exit 1
+fi
 uki_size=$(wc -c <"$uki_artifact")
 if [ $((uki_size * 2 + 16 * 1024 * 1024)) -gt "$esp_size" ]; then
     printf '%s\n' 'ESP cannot retain two current-sized UKIs with 16 MiB free.' >&2

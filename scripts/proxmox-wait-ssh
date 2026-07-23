@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+vmid=${1:-${PROXMOX_VMID:-}}
+timeout=${2:-60}
+previous_boot=${3:-}
+if [ -z "$vmid" ]; then
+    printf 'Usage: %s VMID [TIMEOUT_SECONDS] [PREVIOUS_BOOT_ID]\n' "$0" >&2
+    exit 2
+fi
+
+if [ -f .env.proxmox ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env.proxmox
+    set +a
+fi
+case "${PROXMOX_HOST:-}" in
+    http://*|https://*) base=${PROXMOX_HOST%/} ;;
+    ?*) base="https://${PROXMOX_HOST}:8006" ;;
+    *) printf '%s\n' 'Missing PROXMOX_HOST.' >&2; exit 2 ;;
+esac
+case "$base" in
+    */api2/json) ;;
+    *) base="$base/api2/json" ;;
+esac
+auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
+node=${PROXMOX_NODE:-Prox-PC}
+deadline=$(( $(date +%s) + timeout ))
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    response=$(curl -k -sS -H "$auth" \
+        "$base/nodes/$node/qemu/$vmid/agent/network-get-interfaces" || true)
+    ip=$(printf '%s' "$response" | jq -r \
+        '.data.result[]?.["ip-addresses"][]? |
+         select(.["ip-address-type"] == "ipv4" and
+                .["ip-address"] != "127.0.0.1") |
+         .["ip-address"]' 2>/dev/null | head -n 1)
+    if [ -n "$ip" ]; then
+        boot=$(ssh -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=2 -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -i keys/admin/ace-mgmt.pub "ace-mgmt@$ip" \
+            'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)
+        if [ -n "$boot" ] && [ "$boot" != "$previous_boot" ]; then
+            printf 'VM %s SSH ready: %s (boot %s)\n' "$vmid" "$ip" "$boot"
+            exit 0
+        fi
+    fi
+    sleep 1
+done
+
+printf 'Timed out waiting for VM %s SSH after %s seconds.\n' \
+    "$vmid" "$timeout" >&2
+exit 1

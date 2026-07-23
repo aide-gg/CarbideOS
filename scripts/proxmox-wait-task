@@ -1,0 +1,57 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+upid=${1:-}
+timeout=${2:-600}
+if [ -z "$upid" ]; then
+    printf 'Usage: %s UPID [TIMEOUT_SECONDS]\n' "$0" >&2
+    exit 2
+fi
+
+if [ -f .env.proxmox ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env.proxmox
+    set +a
+fi
+for name in PROXMOX_HOST PROXMOX_USER PROXMOX_TOKEN_NAME PROXMOX_TOKEN_SECRET; do
+    eval "value=\${$name:-}"
+    if [ -z "$value" ]; then
+        printf 'Missing %s.\n' "$name" >&2
+        exit 2
+    fi
+done
+
+case "$PROXMOX_HOST" in
+    http://*|https://*) base=${PROXMOX_HOST%/} ;;
+    *) base="https://${PROXMOX_HOST}:8006" ;;
+esac
+case "$base" in
+    */api2/json) ;;
+    *) base="$base/api2/json" ;;
+esac
+node=$(printf '%s' "$upid" | cut -d: -f2)
+encoded=$(jq -rn --arg value "$upid" '$value | @uri')
+auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
+deadline=$(( $(date +%s) + timeout ))
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    data=$(curl -kfsS -H "$auth" \
+        "$base/nodes/$node/tasks/$encoded/status" | jq '.data')
+    status=$(printf '%s' "$data" | jq -r '.status')
+    if [ "$status" = stopped ]; then
+        exitstatus=$(printf '%s' "$data" | jq -r '.exitstatus')
+        printf '%s: %s\n' "$(printf '%s' "$data" | jq -r '.type')" \
+            "$exitstatus"
+        [ "$exitstatus" = OK ]
+        exit
+    fi
+    sleep 1
+done
+
+printf 'Timed out waiting for Proxmox task after %s seconds: %s\n' \
+    "$timeout" "$upid" >&2
+exit 1

@@ -1,0 +1,51 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+vmid=${1:-}
+if [ -z "$vmid" ] || [ "$#" -lt 2 ]; then
+    printf 'Usage: %s VMID COMMAND [ARGUMENT...]\n' "$0" >&2
+    exit 2
+fi
+shift
+
+if [ -f .env.proxmox ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env.proxmox
+    set +a
+fi
+case "${PROXMOX_HOST:-}" in
+    http://*|https://*) base=${PROXMOX_HOST%/} ;;
+    ?*) base="https://${PROXMOX_HOST}:8006" ;;
+    *) printf '%s\n' 'Missing PROXMOX_HOST.' >&2; exit 2 ;;
+esac
+case "$base" in
+    */api2/json) ;;
+    *) base="$base/api2/json" ;;
+esac
+auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
+node=${PROXMOX_NODE:-Prox-PC}
+command=$(printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]')
+request=$(jq -cn --argjson command "$command" '{command: $command}')
+pid=$(curl -kfsS -X POST -H "$auth" -H 'Content-Type: application/json' \
+    --data "$request" "$base/nodes/$node/qemu/$vmid/agent/exec" |
+    jq -r '.data.pid')
+deadline=$(( $(date +%s) + 30 ))
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    data=$(curl -kfsS -H "$auth" \
+        "$base/nodes/$node/qemu/$vmid/agent/exec-status?pid=$pid" |
+        jq '.data')
+    if [ "$(printf '%s' "$data" | jq -r '.exited // 0')" -eq 1 ]; then
+        printf '%s' "$data" | jq -rj '."out-data" // ""'
+        printf '%s' "$data" | jq -rj '."err-data" // ""' >&2
+        exit "$(printf '%s' "$data" | jq -r '.exitcode')"
+    fi
+    sleep 1
+done
+
+printf 'Timed out waiting for guest command PID %s.\n' "$pid" >&2
+exit 1

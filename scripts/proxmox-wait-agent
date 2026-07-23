@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+vmid=${1:-${PROXMOX_VMID:-}}
+timeout=${2:-180}
+if [ -z "$vmid" ]; then
+    printf 'Usage: %s VMID [TIMEOUT_SECONDS]\n' "$0" >&2
+    exit 2
+fi
+
+if [ -f .env.proxmox ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env.proxmox
+    set +a
+fi
+for name in PROXMOX_HOST PROXMOX_USER PROXMOX_TOKEN_NAME PROXMOX_TOKEN_SECRET; do
+    eval "value=\${$name:-}"
+    if [ -z "$value" ]; then
+        printf 'Missing %s.\n' "$name" >&2
+        exit 2
+    fi
+done
+
+case "$PROXMOX_HOST" in
+    http://*|https://*) base=${PROXMOX_HOST%/} ;;
+    *) base="https://${PROXMOX_HOST}:8006" ;;
+esac
+case "$base" in
+    */api2/json) ;;
+    *) base="$base/api2/json" ;;
+esac
+auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
+node=${PROXMOX_NODE:-Prox-PC}
+deadline=$(( $(date +%s) + timeout ))
+last=
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    response=$(curl -k -sS -H "$auth" \
+        "$base/nodes/$node/qemu/$vmid/agent/network-get-interfaces" || true)
+    ip=$(printf '%s' "$response" | jq -r \
+        '.data.result[]?.["ip-addresses"][]? |
+         select(.["ip-address-type"] == "ipv4" and
+                .["ip-address"] != "127.0.0.1") |
+         .["ip-address"]' 2>/dev/null | head -n 1)
+    if [ -n "$ip" ]; then
+        printf 'VM %s guest agent ready: %s\n' "$vmid" "$ip"
+        exit 0
+    fi
+
+    state=$(printf '%s' "$response" | jq -r '.message // "waiting"' \
+        2>/dev/null || printf waiting)
+    if [ "$state" != "$last" ]; then
+        printf 'VM %s: %s\n' "$vmid" "$state" >&2
+        last=$state
+    fi
+    sleep 1
+done
+
+printf 'Timed out waiting for VM %s guest agent after %s seconds.\n' \
+    "$vmid" "$timeout" >&2
+exit 1

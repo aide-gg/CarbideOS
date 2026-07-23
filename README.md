@@ -128,8 +128,15 @@ sudo /usr/lib/systemd/systemd-sysupdate pending
 sudo /usr/lib/systemd/systemd-sysupdate reboot
 ```
 
-No update or reboot timer is enabled, and CarbideOS does not add a custom boot
-health check. After installing the update-capable baseline once, bump
+Fleet operators use `sudo carbideos-ops update` followed by
+`sudo carbideos-ops reboot`. The broker explicitly selects the counted UKI and
+activates pending updates through `systemd-sysupdate`; do not hard-stop a VM
+between writing an update and its first graceful reboot.
+
+No update or reboot timer is enabled. Counted boots that reach
+`emergency.target` reboot after 15 seconds, kernel panics reboot after 30
+seconds, and the system manager drives the hardware watchdog. After installing
+the update-capable baseline once, bump
 `mkosi.version`, run `make pipeline`, and publish the accumulated feed with:
 
 ```bash
@@ -182,12 +189,16 @@ the host firmware. For Proxmox, use OVMF, add an EFI disk without pre-enrolled
 Microsoft keys, and boot the raw disk in Setup Mode. Never enroll development
 keys on production hardware.
 
+Production Proxmox VMs must also use an `i6300esb` watchdog with action
+`reset`. This covers hangs that cannot reach the counted-boot emergency retry
+service. CarbideOS configures systemd to service it every 60 seconds.
+
 ## Scope
 
-The current build implements the A/B base update transport and TPM/LUKS state,
-but intentionally does not yet implement automatic update scheduling, custom
-boot health checks, volatile `/etc`, sysexts, carbideos-agent, workload
-sandboxing, or any closed-source AIde component.
+The current build implements the A/B base update transport, counted emergency
+retries, and TPM/LUKS state, but intentionally does not yet implement automatic
+update scheduling, application-aware boot health checks, volatile `/etc`,
+carbideos-agent, workload sandboxing, or any closed-source AIde component.
 
 ## License
 

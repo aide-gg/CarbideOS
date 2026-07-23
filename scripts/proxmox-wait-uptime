@@ -1,0 +1,48 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+vmid=${1:-${PROXMOX_VMID:-}}
+wanted=${2:-10}
+timeout=${3:-30}
+if [ -z "$vmid" ]; then
+    printf 'Usage: %s VMID MINIMUM_UPTIME [TIMEOUT_SECONDS]\n' "$0" >&2
+    exit 2
+fi
+
+if [ -f .env.proxmox ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env.proxmox
+    set +a
+fi
+case "${PROXMOX_HOST:-}" in
+    http://*|https://*) base=${PROXMOX_HOST%/} ;;
+    ?*) base="https://${PROXMOX_HOST}:8006" ;;
+    *) printf '%s\n' 'Missing PROXMOX_HOST.' >&2; exit 2 ;;
+esac
+case "$base" in
+    */api2/json) ;;
+    *) base="$base/api2/json" ;;
+esac
+auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
+node=${PROXMOX_NODE:-Prox-PC}
+deadline=$(( $(date +%s) + timeout ))
+
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    data=$(curl -kfsS -H "$auth" \
+        "$base/nodes/$node/qemu/$vmid/status/current" | jq '.data')
+    state=$(printf '%s' "$data" | jq -r '.status')
+    uptime=$(printf '%s' "$data" | jq -r '.uptime // 0')
+    if [ "$state" = running ] && [ "$uptime" -ge "$wanted" ]; then
+        printf 'VM %s uptime reached %s seconds.\n' "$vmid" "$uptime"
+        exit 0
+    fi
+    sleep 1
+done
+
+printf 'Timed out waiting for VM %s uptime %s after %s seconds.\n' \
+    "$vmid" "$wanted" "$timeout" >&2
+exit 1
