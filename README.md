@@ -80,6 +80,14 @@ The package and signing stages also maintain `dist/update-feed/`, containing
 the versioned root, verity, verity-signature, and UKI artifacts consumed by
 `systemd-sysupdate`.
 
+Optional system extensions have their own pinned builders under `extensions/`.
+They are not part of the base image; signed extension DDIs are distributed
+alongside the A/B artifacts in the signed update feed.
+
+CarbideOS accepts only signed, dm-verity-protected extension DDIs. Install the
+allowlisted Rat Game extension with `sudo carbideos-extension install
+rat-game-16` and remove it with `sudo carbideos-extension remove rat-game-16`.
+
 ## Base OS Updates
 
 First boot creates fixed-capacity `_empty` root, verity, and signature slots.

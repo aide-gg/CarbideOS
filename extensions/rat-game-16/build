@@ -1,0 +1,86 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+umask 022
+
+cd "$(dirname "$0")/../.."
+
+upstream=https://github.com/Ogyeet10/rat-game-16.git
+commit=277d18d3dc6e999692f62352e67d5aa8bd0b92b4
+version=$(tr -d '[:space:]' <mkosi.version)
+output="$PWD/dist/extensions/rat-game-16"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+for command in g++ git strip systemd-repart tar unshare; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+repository=${RAT_GAME_SOURCE:-}
+if [ -z "$repository" ]; then
+    repository="$work/repository"
+    git clone --filter=blob:none "$upstream" "$repository"
+fi
+git -C "$repository" cat-file -e "$commit^{commit}"
+epoch=$(git -C "$repository" show -s --format=%ct "$commit")
+
+source_tree="$work/source"
+root="$work/root"
+install -d "$source_tree" "$root/usr/bin" "$root/usr/libexec" \
+    "$root/usr/lib/rat-game-16" "$root/usr/lib/extension-release.d" \
+    "$root/usr/share/licenses/rat-game-16" "$output"
+git -C "$repository" archive "$commit" | tar -x -C "$source_tree"
+
+g++ -std=gnu++20 -O2 -pipe \
+    -Wformat=2 -Werror=format-security \
+    -D_FORTIFY_SOURCE=3 -fstack-protector-strong \
+    -fPIE -static-pie -I"$source_tree/src" "$source_tree/src/main.cc" -lm \
+    -Wl,-z,relro,-z,now,-z,noexecstack \
+    -o "$root/usr/libexec/rat-game-16"
+strip --strip-unneeded "$root/usr/libexec/rat-game-16"
+chmod 0755 "$root/usr/libexec/rat-game-16"
+
+install -m 0755 extensions/rat-game-16/rat-game-16 \
+    "$root/usr/bin/rat-game-16"
+cp -a "$source_tree/assets" "$root/usr/lib/rat-game-16/"
+cp LICENSE "$root/usr/share/licenses/rat-game-16/AGPL-3.0-or-later"
+cat >"$root/usr/share/licenses/rat-game-16/UPSTREAM" <<EOF
+Rat Game 16
+Source: $upstream
+Commit: $commit
+License: AGPL-3.0-or-later, packaged with project-owner authorization
+EOF
+cat >"$root/usr/lib/extension-release.d/extension-release.rat-game-16" <<EOF
+ID=carbideos
+VERSION_ID=$version
+ARCHITECTURE=x86-64
+SYSEXT_ID=rat-game-16
+SYSEXT_VERSION_ID=$commit
+EOF
+
+find "$root" -exec touch -h -d "@$epoch" {} +
+rm -f "$output/rat-game-16.raw" "$output/rat-game-16.elf"
+unshare --user --map-root-user \
+    systemd-repart --make-ddi=sysext \
+    --seed=277d18d3-dc6e-9996-92f6-2352e67d5aa8 \
+    --private-key=keys/secureboot/secure-boot.key \
+    --certificate=keys/secureboot/secure-boot.crt \
+    --copy-source="$root" "$output/rat-game-16.raw"
+install -m 0755 "$root/usr/libexec/rat-game-16" \
+    "$output/rat-game-16.elf"
+cat >"$output/PROVENANCE" <<EOF
+CarbideOS: $version
+Upstream: $upstream
+Commit: $commit
+Source date epoch: $epoch
+EOF
+(
+    cd "$output"
+    sha256sum PROVENANCE rat-game-16.elf rat-game-16.raw >SHA256SUMS
+)
+
+printf 'Built Rat Game 16 sysext for CarbideOS %s in %s\n' \
+    "$version" "$output"

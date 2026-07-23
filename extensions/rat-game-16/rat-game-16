@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+state=${XDG_STATE_HOME:-${HOME:?HOME is not set}/.local/state}/rat-game-16
+install -d -m 0700 "$state/debug"
+ln -sfn /usr/lib/rat-game-16/assets "$state/assets"
+cd "$state"
+exec /usr/libexec/rat-game-16 "$@"

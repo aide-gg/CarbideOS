@@ -37,6 +37,14 @@ cp keys/manifest/release-signing.pub.asc "$release/"
 cp keys/secureboot/secure-boot.crt "$release/secure-boot.crt"
 cp keys/verity/verity.crt "$release/verity.crt"
 
+extension=dist/extensions/rat-game-16/rat-game-16.raw
+if [ ! -s "$extension" ]; then
+    printf '%s\n' 'Missing Rat Game system extension; run make extensions.' >&2
+    exit 1
+fi
+cp --preserve=mode,timestamps "$extension" \
+    "$update_feed/rat-game-16_277d18d.sysext.raw"
+
 raw=$(mktemp --suffix=.raw)
 verity_sig_raw=$(mktemp --suffix=.verity-sig.raw)
 trap 'rm -f "$raw" "$verity_sig_raw"' EXIT HUP INT TERM

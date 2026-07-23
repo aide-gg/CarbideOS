@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-.PHONY: keys build debug package sign verify pipeline publish-r2 clean clean-tools
+.PHONY: keys build debug extensions package sign verify pipeline publish-r2 clean clean-tools
 
 keys:
 	./scripts/provision-keys
@@ -11,6 +11,9 @@ build:
 debug:
 	./scripts/build --debug
 
+extensions:
+	./extensions/rat-game-16/build
+
 package:
 	./scripts/package
 
@@ -20,7 +23,7 @@ sign:
 verify:
 	./scripts/verify
 
-pipeline: build package sign verify
+pipeline: build extensions package sign verify
 
 publish-r2:
 	@test -n "$(SOURCE)" || { echo 'Usage: make publish-r2 SOURCE=dist/update-feed' >&2; exit 2; }

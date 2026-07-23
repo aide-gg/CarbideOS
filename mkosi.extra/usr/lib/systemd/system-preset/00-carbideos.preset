@@ -12,6 +12,7 @@ disable sshd-keygen@.service
 enable sshd.service
 enable systemd-networkd.service
 enable systemd-resolved.service
+enable systemd-sysext.service
 enable var.mount
 enable var-lib-carbideos-workload.mount
 enable systemd-homed.service

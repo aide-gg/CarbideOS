@@ -1,0 +1,46 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+[ "$(id -u)" -eq 0 ] || { printf '%s\n' 'Must run as root.' >&2; exit 1; }
+[ "$#" -eq 2 ] || { printf 'Usage: %s install|remove NAME\n' "$0" >&2; exit 2; }
+
+action=$1
+name=$2
+case "$name" in
+    rat-game-16)
+        artifact=rat-game-16_277d18d.sysext.raw
+        ;;
+    *)
+        printf 'Unknown extension: %s\n' "$name" >&2
+        exit 1
+        ;;
+esac
+
+target=/var/lib/extensions/$name.raw
+policy=root=verity+signed+absent:usr=verity+signed+absent
+case "$action" in
+    install)
+        install -d -m 0755 /var/lib/extensions
+        temporary=$(mktemp "/var/lib/extensions/.$name.XXXXXX")
+        trap 'rm -f "$temporary"' EXIT HUP INT TERM
+        /usr/lib/systemd/systemd-pull raw --direct --verify=no \
+            --class=sysext --size-max=64M \
+            "https://updates.aide.gg/carbideos/$artifact" "$temporary"
+        chmod 0644 "$temporary"
+        mv -f "$temporary" "$target"
+        if ! systemd-sysext --image-policy="$policy" refresh; then
+            rm -f "$target"
+            systemd-sysext --image-policy="$policy" refresh || true
+            exit 1
+        fi
+        ;;
+    remove)
+        rm -f "$target"
+        systemd-sysext --image-policy="$policy" refresh
+        ;;
+    *)
+        printf 'Unknown action: %s\n' "$action" >&2
+        exit 2
+        ;;
+esac

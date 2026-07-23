@@ -36,6 +36,7 @@ authselect enable-feature with-systemd-homed
 
 systemctl enable sshd.service systemd-homed.service systemd-networkd.service \
     systemd-resolved.service systemd-userdbd.socket \
+    systemd-sysext.service \
     carbideos-home-init.service carbideos-homed-activate.service \
     carbideos-repart.service \
     carbideos-sshd-keygen.service carbideos-var-init.service home.mount \

@@ -106,7 +106,7 @@ while IFS="$tab" read -r relative size; do
     case "$relative" in
         SHA256SUMS|SHA256SUMS.gpg|carbideos_*.efi|\
         carbideos_*.root.raw.zst|carbideos_*.verity.raw.zst|\
-        carbideos_*.verity-sig.raw.zst)
+        carbideos_*.verity-sig.raw.zst|rat-game-16_*.sysext.raw)
             ;;
         *)
             printf 'Refusing unexpected update-feed file: %s\n' \
