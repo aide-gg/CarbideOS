@@ -14,4 +14,5 @@ if ! homectl inspect ace-mgmt >/dev/null 2>&1; then
         -P
 fi
 
-exec env PASSWORD="$password" homectl with ace-mgmt /usr/bin/sleep infinity
+exec env PASSWORD="$password" homectl with ace-mgmt /bin/sh -c \
+    'systemd-notify --ready; exec /usr/bin/sleep infinity'

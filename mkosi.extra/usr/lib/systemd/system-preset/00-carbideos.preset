@@ -17,6 +17,8 @@ enable var.mount
 enable var-lib-carbideos-workload.mount
 enable systemd-homed.service
 disable systemd-importd.service
+disable systemd-importd.socket
 disable systemd-machined.service
+disable systemd-machined.socket
 disable systemd-nsresourced.socket
 enable systemd-userdbd.socket

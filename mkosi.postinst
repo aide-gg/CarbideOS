@@ -54,7 +54,9 @@ systemctl mask systemd-homed-firstboot.service ssh-host-keys-migration.service \
 # needed for systemd-pull, but CarbideOS does not expose their APIs.
 for unit in \
     systemd-importd.service \
+    systemd-importd.socket \
     systemd-machined.service \
+    systemd-machined.socket \
     systemd-nsresourced.service \
     systemd-nsresourced.socket; do
     ln -sf /dev/null "/etc/systemd/system/$unit"

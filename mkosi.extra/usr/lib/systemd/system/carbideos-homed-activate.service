@@ -4,10 +4,11 @@
 Description=Create and activate the CarbideOS break-glass home
 Requires=carbideos-home-init.service systemd-homed.service
 After=carbideos-home-init.service systemd-homed.service
-Before=sshd.service
+Before=getty.target sshd.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 ExecStart=/usr/libexec/carbideos-homed-activate
 
 [Install]

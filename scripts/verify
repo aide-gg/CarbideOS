@@ -23,9 +23,9 @@ if grep -Eq '^(PasswordAuthentication yes|AllowUsers .*ace-bootstrap)' \
     printf '%s\n' 'Production SSH configuration enables a migration login.' >&2
     exit 1
 fi
-if ! grep -Fqx 'exec env PASSWORD="$password" homectl with ace-mgmt /usr/bin/sleep infinity' \
+if ! grep -Fq 'systemd-notify --ready; exec /usr/bin/sleep infinity' \
     mkosi.extra/usr/libexec/carbideos-homed-activate || \
-   ! grep -Fqx 'Type=simple' \
+   ! grep -Fqx 'Type=notify' \
     mkosi.extra/usr/lib/systemd/system/carbideos-homed-activate.service; then
     printf '%s\n' 'Homed activation must retain a boot-long home reference.' >&2
     exit 1
@@ -93,7 +93,7 @@ set -- "$update_feed"/"carbideos_${version}_"*.verity.raw.zst
 verity_artifact=$1
 verity_sig_artifact="$update_feed/carbideos_${version}.verity-sig.raw.zst"
 uki_artifact="$update_feed/carbideos_${version}.efi"
-extension_artifact="$update_feed/rat-game-16_277d18d-2.sysext.raw"
+extension_artifact="$update_feed/rat-game-16_277d18d-3.sysext.raw"
 if [ ! -s "$extension_artifact" ]; then
     printf '%s\n' 'Missing Rat Game system extension artifact.' >&2
     exit 1
