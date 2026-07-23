@@ -7,7 +7,8 @@ variant=development
 case "${1-}" in
     '') ;;
     --fleet) variant=fleet ;;
-    *) printf 'Usage: %s [--fleet]\n' "$0" >&2; exit 2 ;;
+    --playground) variant=playground ;;
+    *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
 esac
 version=$(tr -d '[:space:]' <mkosi.version)
 if [ "$variant" = fleet ]; then
@@ -15,6 +16,11 @@ if [ "$variant" = fleet ]; then
     update_feed="$PWD/dist/update-feed/fleet"
     gnupg="$PWD/keys/production/manifest/gnupg"
     signer='CarbideOS Production Release'
+elif [ "$variant" = playground ]; then
+    release="$PWD/dist/playground/carbideos-${version}"
+    update_feed="$PWD/dist/update-feed/playground"
+    gnupg="$PWD/keys/playground/manifest/gnupg"
+    signer='CarbideOS Playground Release'
 else
     release="$PWD/dist/carbideos-${version}"
     update_feed="$PWD/dist/update-feed"
@@ -44,11 +50,11 @@ fi
         | LC_ALL=C sort \
         | xargs -r sha256sum >SHA256SUMS
 )
-if [ "$variant" = fleet ]; then
-    passphrase=${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    passphrase=${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}
     if [ -z "$passphrase" ]; then
         passphrase=$(systemd-ask-password \
-            'CarbideOS production signing passphrase:')
+            "CarbideOS $variant signing passphrase:")
     fi
     printf '%s\n' "$passphrase" | GNUPGHOME="$gnupg" \
         gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \

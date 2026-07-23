@@ -7,7 +7,8 @@ variant=development
 case "${1-}" in
     '') ;;
     --fleet) variant=fleet ;;
-    *) printf 'Usage: %s [--fleet]\n' "$0" >&2; exit 2 ;;
+    --playground) variant=playground ;;
+    *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
 esac
 version=$(tr -d '[:space:]' <mkosi.version)
 if [ "$variant" = fleet ]; then
@@ -20,6 +21,16 @@ if [ "$variant" = fleet ]; then
     sysext_cert=keys/production/sysext/sysext.crt
     extension=dist/extensions/fleet/rat-game-16/rat-game-16.raw
     update_prefix=carbideos-fleet
+elif [ "$variant" = playground ]; then
+    output=carbideos-playground
+    release="dist/playground/carbideos-${version}"
+    update_feed="dist/update-feed/playground"
+    release_pub=keys/playground/manifest/release-signing.pub.asc
+    secureboot_cert=keys/playground/secureboot/secureboot.crt
+    verity_cert=keys/playground/verity/verity.crt
+    sysext_cert=keys/playground/sysext/sysext.crt
+    extension=dist/extensions/playground/rat-game-16/rat-game-16.raw
+    update_prefix=carbideos-playground
 else
     output=carbideos
     release="dist/carbideos-${version}"
@@ -40,12 +51,13 @@ fi
 rm -rf "$release"
 mkdir -p "$release"
 mkdir -p "$update_feed"
-if [ "$variant" = fleet ]; then
-    find "$update_feed" -maxdepth 1 -type f -name 'carbideos_*' -delete
-fi
 find "$update_feed" -maxdepth 1 -type f \
-    \( -name "${update_prefix}_${version}.*" \
-       -o -name "${update_prefix}_${version}_*" \
+    \( -name 'carbideos_*.efi' \
+       -o -name 'carbideos_*.root.raw.zst' \
+       -o -name 'carbideos_*.verity.raw.zst' \
+       -o -name 'carbideos_*.verity-sig.raw.zst' \
+       -o -name 'carbideos-fleet_*' \
+       -o -name 'carbideos-playground_*' \
        -o -name 'SHA256SUMS' -o -name 'SHA256SUMS.gpg' \) -delete
 
 for artifact in \

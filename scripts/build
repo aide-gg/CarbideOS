@@ -13,13 +13,16 @@ case "${1-}" in
     --fleet)
         variant=fleet
         ;;
+    --playground)
+        variant=playground
+        ;;
     *)
-        printf 'Usage: %s [--debug|--fleet]\n' "$0" >&2
+        printf 'Usage: %s [--debug|--fleet|--playground]\n' "$0" >&2
         exit 2
         ;;
 esac
 if [ "$#" -gt 1 ]; then
-    printf 'Usage: %s [--debug|--fleet]\n' "$0" >&2
+    printf 'Usage: %s [--debug|--fleet|--playground]\n' "$0" >&2
     exit 2
 fi
 
@@ -32,6 +35,15 @@ case "$variant" in
         release_pub=keys/production/manifest/release-signing.pub.asc
         admin_group=carbide-operator
         output=carbideos-fleet
+        ;;
+    playground)
+        secureboot_key=keys/playground/secureboot/secureboot.key
+        secureboot_cert=keys/playground/secureboot/secureboot.crt
+        verity_key=keys/playground/verity/verity.key
+        verity_cert=keys/playground/verity/verity.crt
+        release_pub=keys/playground/manifest/release-signing.pub.asc
+        admin_group=carbide-operator
+        output=carbideos-playground
         ;;
     debug)
         secureboot_key=keys/secureboot/secure-boot.key
@@ -53,20 +65,35 @@ case "$variant" in
         ;;
 esac
 
+if [ "$variant" = development ] || [ "$variant" = debug ]; then
+    if [ ! -s keys/secureboot/secure-boot.key ] || \
+       [ ! -s keys/verity/verity.key ] || \
+       [ ! -s keys/manifest/release-signing.pub.asc ] || \
+       [ ! -s keys/admin/ace-mgmt.pub ] || \
+       [ ! -s keys/admin/ace-mgmt.password ]; then
+        ./scripts/provision-keys
+    fi
+fi
+
 for file in \
     "$secureboot_key" \
     "$secureboot_cert" \
     "$verity_key" \
     "$verity_cert" \
-    "$release_pub" \
-    keys/admin/ace-mgmt.pub; do
+    "$release_pub"; do
     if [ ! -s "$file" ]; then
         printf 'Missing %s; run make keys first.\n' "$file" >&2
         exit 1
     fi
 done
 
-if [ "$variant" != fleet ] && [ ! -s keys/admin/ace-mgmt.password ]; then
+if [ "$variant" != playground ] && [ ! -s keys/admin/ace-mgmt.pub ]; then
+    printf '%s\n' 'Missing keys/admin/ace-mgmt.pub.' >&2
+    exit 1
+fi
+
+if [ "$variant" != fleet ] && [ "$variant" != playground ] && \
+   [ ! -s keys/admin/ace-mgmt.password ]; then
     printf '%s\n' 'Missing keys/admin/ace-mgmt.password.' >&2
     exit 1
 fi
@@ -77,7 +104,7 @@ if [ "$(stat -c '%a' "$secureboot_key")" -gt 600 ] || \
     exit 1
 fi
 
-if [ "$variant" != fleet ] && \
+if [ "$variant" != fleet ] && [ "$variant" != playground ] && \
    [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; then
     printf '%s\n' 'The admin password file must not be group/world accessible.' >&2
     exit 1
@@ -89,8 +116,8 @@ if [ "$(id -u)" -ne 0 ]; then
         exit 1
     fi
     printf '%s\n' 'Elevating mkosi so Fedora SELinux labels can be applied.'
-    if [ -n "${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}" ]; then
-        exec sudo --preserve-env=CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+    if [ -n "${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}" ]; then
+        exec sudo --preserve-env=CARBIDEOS_SIGNING_KEY_PASSPHRASE \
             "$PWD/scripts/build" "$@"
     fi
     exec sudo "$PWD/scripts/build" "$@"
@@ -111,50 +138,60 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ "$variant" = fleet ]; then
-    passphrase=${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    passphrase=${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}
     if [ -z "$passphrase" ]; then
+        display_variant=$variant
         passphrase=$(systemd-ask-password \
-            'CarbideOS production signing passphrase:')
+            "CarbideOS $display_variant signing passphrase:")
     fi
     private_work=$(mktemp -d)
     chmod 0700 "$private_work"
-    export CARBIDEOS_PRODUCTION_KEY_PASSPHRASE="$passphrase"
+    export CARBIDEOS_SIGNING_KEY_PASSPHRASE="$passphrase"
     openssl pkey -in "$secureboot_key" \
-        -passin env:CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+        -passin env:CARBIDEOS_SIGNING_KEY_PASSPHRASE \
         -out "$private_work/secureboot.key"
     openssl pkey -in "$verity_key" \
-        -passin env:CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+        -passin env:CARBIDEOS_SIGNING_KEY_PASSPHRASE \
         -out "$private_work/verity.key"
     chmod 0600 "$private_work"/*.key
     secureboot_key="$private_work/secureboot.key"
     verity_key="$private_work/verity.key"
-    unset CARBIDEOS_PRODUCTION_KEY_PASSPHRASE passphrase
+    unset CARBIDEOS_SIGNING_KEY_PASSPHRASE passphrase
 fi
 install -d -m 0755 "$extra/usr/lib/carbideos/authorized_keys"
-install -m 0644 keys/admin/ace-mgmt.pub \
-    "$extra/usr/lib/carbideos/authorized_keys/ace-mgmt"
+if [ "$variant" != playground ]; then
+    install -m 0644 keys/admin/ace-mgmt.pub \
+        "$extra/usr/lib/carbideos/authorized_keys/ace-mgmt"
+fi
 printf '%s\n' "$admin_group" >"$extra/usr/lib/carbideos/admin-group"
 install -d -m 0755 "$extra/usr/share/carbideos"
 gpg --batch --dearmor <"$release_pub" | base64 -w 0 \
     >"$extra/usr/share/carbideos/import-pubring.pgp.b64"
 printf '\n' >>"$extra/usr/share/carbideos/import-pubring.pgp.b64"
-if [ "$variant" != fleet ]; then
+if [ "$variant" != fleet ] && [ "$variant" != playground ]; then
     install -m 0600 keys/admin/ace-mgmt.password \
         "$extra/usr/lib/carbideos/ace-mgmt.password"
 fi
-if [ "$variant" = fleet ]; then
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    if [ "$variant" = fleet ]; then
+        channel=fleet
+        prefix=carbideos-fleet
+    else
+        channel=playground
+        prefix=carbideos-playground
+    fi
     install -d -m 0755 \
         "$extra/usr/lib/sysupdate.d" \
         "$extra/usr/sbin"
     for transfer in mkosi.extra/usr/lib/sysupdate.d/*.transfer; do
         destination="$extra/usr/lib/sysupdate.d/$(basename "$transfer")"
         sed \
-            -e 's|https://updates.aide.gg/carbideos|https://updates.aide.gg/carbideos/fleet|g' \
-            -e 's/carbideos_/carbideos-fleet_/g' \
+            -e "s|https://updates.aide.gg/carbideos|https://updates.aide.gg/carbideos/$channel|g" \
+            -e "s/carbideos_/${prefix}_/g" \
             "$transfer" >"$destination"
     done
-    sed 's|https://updates.aide.gg/carbideos/|https://updates.aide.gg/carbideos/fleet/|g' \
+    sed "s|https://updates.aide.gg/carbideos/|https://updates.aide.gg/carbideos/$channel/|g" \
         mkosi.extra/usr/sbin/carbideos-extension \
         >"$extra/usr/sbin/carbideos-extension"
     chmod 0755 "$extra/usr/sbin/carbideos-extension"
@@ -187,6 +224,17 @@ if [ "$variant" = fleet ]; then
         --output="$output" --image-id=carbideos-fleet --hostname=carbideos \
         --unified-kernel-image-format=carbideos-fleet_%v \
         --environment=CARBIDEOS_VARIANT=fleet \
+        --secure-boot-key="$secureboot_key" \
+        --secure-boot-certificate="$secureboot_cert" \
+        --verity-key="$verity_key" \
+        --verity-certificate="$verity_cert" build
+elif [ "$variant" = playground ]; then
+    printf '%s\n' 'Building CarbideOS Playground image with isolated trust.'
+    mkosi --extra-tree="$extra" \
+        --output="$output" --image-id=carbideos-playground \
+        --hostname=carbideos-playground \
+        --unified-kernel-image-format=carbideos-playground_%v \
+        --environment=CARBIDEOS_VARIANT=playground \
         --secure-boot-key="$secureboot_key" \
         --secure-boot-certificate="$secureboot_cert" \
         --verity-key="$verity_key" \

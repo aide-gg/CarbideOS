@@ -5,9 +5,30 @@ set -eu
 cd "$(dirname "$0")/.."
 umask 077
 
-destination=keys/production
+variant=${CARBIDEOS_KEY_VARIANT:-production}
+case "$variant" in
+    production)
+        destination=keys/production
+        display='Production'
+        release_identity='CarbideOS Production Release <release@carbideos.aide.gg>'
+        release_name='CarbideOS Production Release'
+        validity=3y
+        ;;
+    playground)
+        destination=keys/playground
+        display='Playground'
+        release_identity='CarbideOS Playground Release <playground@carbideos.aide.gg>'
+        release_name='CarbideOS Playground Release'
+        validity=2y
+        ;;
+    *)
+        printf 'Unknown key variant: %s\n' "$variant" >&2
+        exit 2
+        ;;
+esac
 if [ -e "$destination" ]; then
-    printf '%s\n' "$destination already exists; refusing to overwrite production trust." >&2
+    printf '%s\n' \
+        "$destination already exists; refusing to overwrite signing trust." >&2
     exit 1
 fi
 
@@ -19,9 +40,9 @@ for command in gpg openssl systemd-ask-password; do
 done
 
 passphrase=$(systemd-ask-password \
-    'New CarbideOS production signing passphrase:')
+    "New CarbideOS $display signing passphrase:")
 confirmation=$(systemd-ask-password \
-    'Confirm CarbideOS production signing passphrase:')
+    "Confirm CarbideOS $display signing passphrase:")
 if [ -z "$passphrase" ] || [ "$passphrase" != "$confirmation" ]; then
     printf '%s\n' 'Passphrases are empty or do not match.' >&2
     exit 1
@@ -53,10 +74,10 @@ make_certificate() {
         -out "$destination/$name/$name.crt"
 }
 
-make_certificate secureboot 'CarbideOS Production Secure Boot'
-make_certificate verity 'CarbideOS Production Base Verity'
+make_certificate secureboot "CarbideOS $display Secure Boot"
+make_certificate verity "CarbideOS $display Base Verity"
 openssl req -new -newkey rsa:4096 -sha256 \
-    -subj '/CN=CarbideOS Production System Extension Verity/' \
+    -subj "/CN=CarbideOS $display System Extension Verity/" \
     -passout env:CARBIDEOS_KEY_PASSPHRASE \
     -keyout "$destination/sysext/sysext.key" \
     -out "$destination/sysext/sysext.csr"
@@ -83,10 +104,9 @@ printf '%s\n' "$passphrase" | \
     GNUPGHOME="$PWD/$destination/manifest/gnupg" \
     gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
         --quick-generate-key \
-        'CarbideOS Production Release <release@carbideos.aide.gg>' \
-        ed25519 sign 3y
+        "$release_identity" ed25519 sign "$validity"
 GNUPGHOME="$PWD/$destination/manifest/gnupg" gpg --batch --armor --export \
-    'CarbideOS Production Release' \
+    "$release_name" \
     >"$destination/manifest/release-signing.pub.asc"
 
 {
@@ -97,7 +117,7 @@ GNUPGHOME="$PWD/$destination/manifest/gnupg" gpg --batch --armor --export \
     done
     GNUPGHOME="$PWD/$destination/manifest/gnupg" \
         gpg --batch --with-colons --fingerprint \
-            'CarbideOS Production Release' | \
+            "$release_name" | \
         awk -F: '$1 == "fpr" { print "manifest OpenPGP " $10; exit }'
 } >"$destination/FINGERPRINTS"
 
@@ -112,7 +132,7 @@ complete=yes
 unset CARBIDEOS_KEY_PASSPHRASE passphrase
 trap - EXIT HUP INT TERM
 
-printf '%s\n' 'Production signing identities created:'
+printf '%s signing identities created:\n' "$display"
 cat "$destination/FINGERPRINTS"
 printf '\n%s\n' \
-    'Back up keys/production offline before using these identities for a release.'
+    "Back up $destination offline before using these identities for a release."

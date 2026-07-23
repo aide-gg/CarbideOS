@@ -24,10 +24,11 @@ ACE, Chrome, desktop, or fleet provisioning code.
   open it without a separate plaintext unlock credential.
 - Release artifacts are checksummed and signed by a separate OpenPGP key.
 
-The checked-in files never contain private signing keys. `make keys` provisions
-development keys under the gitignored `keys/` directory. These local keys are
-appropriate only for initial development; production keys must be offline or
-hardware-backed and independently backed up.
+The checked-in files never contain private signing keys. Development builds
+automatically provision disposable, passphrase-free keys under the gitignored
+`keys/` directory when they are absent. Existing key material is never
+overwritten. Production and Playground trust require separate, explicit key
+ceremonies and must be independently backed up.
 
 ## Build
 
@@ -37,11 +38,15 @@ The host needs Linux, mkosi 25.3 or newer, and the dependencies reported by
 ```bash
 sudo apt install mkosi dnf systemd-boot systemd-ukify systemd-repart \
   erofs-utils mtools sbsigntool python3-cryptography gpg
-make keys
-install -m 0644 ~/.ssh/id_ed25519.pub keys/admin/ace-mgmt.pub
-install -m 0600 /path/to/admin-password keys/admin/ace-mgmt.password
 make pipeline
 ```
+
+`make build`, `make debug`, and `make pipeline` create missing development
+signing keys, a passphrase-free local SSH keypair, and the development admin
+password without prompting. The generated password is random and remains in
+`keys/admin/ace-mgmt.password`. Run `make keys` directly to provision these
+inputs before a build. These credentials are development-only; Fleet and
+Playground keys are never auto-provisioned.
 
 `scripts/build` invokes `sudo mkosi build` because creating an enforcing
 SELinux filesystem from a non-SELinux host requires permission to write

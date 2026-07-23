@@ -25,6 +25,14 @@ case "$variant" in
         printf '%s\n' 'VARIANT="Debug"' 'VARIANT_ID=debug' \
             >>/usr/lib/os-release
         ;;
+    playground)
+        sed -i \
+            -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"CarbideOS $IMAGE_VERSION (Playground)\"/" \
+            -e 's/^IMAGE_ID=.*/IMAGE_ID=carbideos-playground/' \
+            /usr/lib/os-release
+        printf '%s\n' 'VARIANT="Playground"' 'VARIANT_ID=playground' \
+            >>/usr/lib/os-release
+        ;;
     development) ;;
     *)
         printf 'Unknown CarbideOS build variant: %s\n' "$variant" >&2
@@ -65,6 +73,13 @@ systemctl enable sshd.service systemd-homed.service systemd-networkd.service \
     carbideos-repart.service \
     carbideos-sshd-keygen.service carbideos-var-init.service home.mount \
     var.mount var-lib-carbideos-workload.mount
+if [ "$variant" = playground ]; then
+    systemctl disable sshd.service carbideos-homed-activate.service \
+        carbideos-sshd-keygen.service
+    systemctl mask sshd.service carbideos-homed-activate.service \
+        carbideos-sshd-keygen.service
+    systemctl enable carbideos-playground-enroll.service
+fi
 systemctl mask systemd-homed-firstboot.service ssh-host-keys-migration.service \
     sshd-keygen@.service systemd-pcrproduct.service getty@tty2.service \
     getty@tty3.service getty@tty4.service getty@tty5.service \

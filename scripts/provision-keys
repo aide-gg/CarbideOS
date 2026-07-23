@@ -5,33 +5,68 @@ set -eu
 cd "$(dirname "$0")/.."
 umask 077
 
-if [ -e keys ]; then
-    printf '%s\n' 'keys/ already exists; refusing to overwrite signing material' >&2
+mkdir -p keys/secureboot keys/verity keys/manifest/gnupg keys/admin
+
+signing_files='keys/secureboot/secure-boot.key
+keys/secureboot/secure-boot.crt
+keys/verity/verity.key
+keys/verity/verity.crt
+keys/manifest/release-signing.pub.asc'
+present=0
+missing=0
+for file in $signing_files; do
+    if [ -e "$file" ]; then
+        present=1
+    else
+        missing=1
+    fi
+done
+if [ "$present" -eq 1 ] && [ "$missing" -eq 1 ]; then
+    printf '%s\n' \
+        'Development signing material is partial; refusing to overwrite it.' >&2
     exit 1
 fi
 
-mkdir -p keys/secureboot keys/verity keys/manifest/gnupg keys/admin
+if [ "$missing" -eq 1 ]; then
+    openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
+        -subj '/CN=CarbideOS Development Secure Boot/' \
+        -keyout keys/secureboot/secure-boot.key \
+        -out keys/secureboot/secure-boot.crt
 
-openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
-    -subj '/CN=CarbideOS Development Secure Boot/' \
-    -keyout keys/secureboot/secure-boot.key \
-    -out keys/secureboot/secure-boot.crt
+    openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
+        -subj '/CN=CarbideOS Development Verity/' \
+        -keyout keys/verity/verity.key \
+        -out keys/verity/verity.crt
 
-openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
-    -subj '/CN=CarbideOS Development Verity/' \
-    -keyout keys/verity/verity.key \
-    -out keys/verity/verity.crt
+    GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --passphrase '' \
+        --quick-generate-key \
+        'CarbideOS Development Release <release@carbideos.invalid>' \
+        ed25519 sign 2y
+    GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --armor --export \
+        'CarbideOS Development Release' \
+        >keys/manifest/release-signing.pub.asc
+fi
 
-GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --passphrase '' \
-    --quick-generate-key 'CarbideOS Development Release <release@carbideos.invalid>' \
-    ed25519 sign 2y
-GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --armor --export \
-    'CarbideOS Development Release' >keys/manifest/release-signing.pub.asc
+if [ ! -s keys/admin/ace-mgmt.pub ]; then
+    if [ -e keys/admin/ace-mgmt.key ]; then
+        printf '%s\n' \
+            'Development admin private key exists without its public key.' >&2
+        exit 1
+    fi
+    ssh-keygen -q -t ed25519 -N '' \
+        -C 'CarbideOS development administrator' \
+        -f keys/admin/ace-mgmt.key
+    mv keys/admin/ace-mgmt.key.pub keys/admin/ace-mgmt.pub
+fi
+if [ ! -s keys/admin/ace-mgmt.password ]; then
+    head -c 32 /dev/urandom | base64 >keys/admin/ace-mgmt.password
+fi
 
 chmod 0600 keys/secureboot/secure-boot.key keys/verity/verity.key
 chmod 0700 keys/manifest/gnupg
+chmod 0600 keys/admin/ace-mgmt.password
+[ ! -e keys/admin/ace-mgmt.key ] || chmod 0600 keys/admin/ace-mgmt.key
+chmod 0644 keys/admin/ace-mgmt.pub
 
-printf '%s\n' 'Development signing keys provisioned under gitignored keys/.'
-printf '%s\n' 'Back them up securely; losing these keys prevents trusted updates.'
-printf '%s\n' 'Before building, install an SSH public key at keys/admin/ace-mgmt.pub'
-printf '%s\n' 'and a mode-0600 password file at keys/admin/ace-mgmt.password.'
+printf '%s\n' 'Development keys and admin inputs are ready under gitignored keys/.'
+printf '%s\n' 'Development keys are disposable and have no passphrases.'

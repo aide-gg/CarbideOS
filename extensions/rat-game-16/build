@@ -9,13 +9,14 @@ variant=development
 case "${1-}" in
     '') ;;
     --fleet) variant=fleet ;;
+    --playground) variant=playground ;;
     *)
-        printf 'Usage: %s [--fleet]\n' "$0" >&2
+        printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2
         exit 2
         ;;
 esac
 if [ "$#" -gt 1 ]; then
-    printf 'Usage: %s [--fleet]\n' "$0" >&2
+    printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2
     exit 2
 fi
 
@@ -26,6 +27,10 @@ if [ "$variant" = fleet ]; then
     output="$PWD/dist/extensions/fleet/rat-game-16"
     signing_key=keys/production/sysext/sysext.key
     signing_cert=keys/production/sysext/sysext.crt
+elif [ "$variant" = playground ]; then
+    output="$PWD/dist/extensions/playground/rat-game-16"
+    signing_key=keys/playground/sysext/sysext.key
+    signing_cert=keys/playground/sysext/sysext.crt
 else
     output="$PWD/dist/extensions/rat-game-16"
     signing_key=keys/secureboot/secure-boot.key
@@ -37,19 +42,19 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-if [ "$variant" = fleet ]; then
-    passphrase=${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    passphrase=${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}
     if [ -z "$passphrase" ]; then
         passphrase=$(systemd-ask-password \
-            'CarbideOS production signing passphrase:')
+            "CarbideOS $variant signing passphrase:")
     fi
-    export CARBIDEOS_PRODUCTION_KEY_PASSPHRASE="$passphrase"
+    export CARBIDEOS_SIGNING_KEY_PASSPHRASE="$passphrase"
     openssl pkey -in "$signing_key" \
-        -passin env:CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+        -passin env:CARBIDEOS_SIGNING_KEY_PASSPHRASE \
         -out "$work/sysext.key"
     chmod 0600 "$work/sysext.key"
     signing_key="$work/sysext.key"
-    unset CARBIDEOS_PRODUCTION_KEY_PASSPHRASE passphrase
+    unset CARBIDEOS_SIGNING_KEY_PASSPHRASE passphrase
 fi
 
 for command in g++ git mkfs.erofs openssl strip systemd-repart tar; do

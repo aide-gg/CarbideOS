@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+CARBIDEOS_KEY_VARIANT=playground
+export CARBIDEOS_KEY_VARIANT
+exec ./scripts/provision-production-keys

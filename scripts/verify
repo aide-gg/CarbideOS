@@ -7,7 +7,8 @@ variant=development
 case "${1-}" in
     '') ;;
     --fleet) variant=fleet ;;
-    *) printf 'Usage: %s [--fleet]\n' "$0" >&2; exit 2 ;;
+    --playground) variant=playground ;;
+    *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
 esac
 version=$(tr -d '[:space:]' <mkosi.version)
 if [ "$variant" = fleet ]; then
@@ -17,6 +18,13 @@ if [ "$variant" = fleet ]; then
     secureboot_cert=keys/production/secureboot/secureboot.crt
     trusted_release_pub=keys/production/manifest/release-signing.pub.asc
     update_prefix=carbideos-fleet
+elif [ "$variant" = playground ]; then
+    release="$PWD/dist/playground/carbideos-${version}"
+    update_feed="$PWD/dist/update-feed/playground"
+    output=carbideos-playground
+    secureboot_cert=keys/playground/secureboot/secureboot.crt
+    trusted_release_pub=keys/playground/manifest/release-signing.pub.asc
+    update_prefix=carbideos-playground
 else
     release="$PWD/dist/carbideos-${version}"
     update_feed="$PWD/dist/update-feed"
@@ -32,11 +40,13 @@ if [ -e mkosi.extra/usr/lib/carbideos/authorized_keys/ace-mgmt ]; then
     printf '%s\n' 'The source tree must not contain an authorized admin key.' >&2
     exit 1
 fi
-if [ "$(stat -c '%a' keys/admin/ace-mgmt.pub)" -gt 644 ] || \
-   { [ "$variant" != fleet ] && \
-     [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; }; then
-    printf '%s\n' 'Local admin credential inputs have unsafe modes.' >&2
-    exit 1
+if [ "$variant" != playground ]; then
+    if [ "$(stat -c '%a' keys/admin/ace-mgmt.pub)" -gt 644 ] || \
+       { [ "$variant" != fleet ] && \
+         [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; }; then
+        printf '%s\n' 'Local admin credential inputs have unsafe modes.' >&2
+        exit 1
+    fi
 fi
 
 if ! cmp -s "$trusted_release_pub" "$release/release-signing.pub.asc"; then
@@ -101,6 +111,8 @@ for command in jq sbverify sfdisk systemd-dissect zstd; do
         exit 1
     fi
 done
+sfdisk=${SFDISK:-$(command -v sfdisk || true)}
+[ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk
 
 for pattern in \
     "${update_prefix}_${version}.efi" \
@@ -131,14 +143,49 @@ if ! sudo systemd-dissect "$extension_artifact" | grep -q 'signed'; then
     printf '%s\n' 'System extension is not verity signed.' >&2
     exit 1
 fi
+signature_start=$("$sfdisk" --json "$extension_artifact" | jq -r \
+    '.partitiontable.partitions[] | select(.name == "root-x86-64-verity-sig") | .start')
+signature_size=$("$sfdisk" --json "$extension_artifact" | jq -r \
+    '.partitiontable.partitions[] | select(.name == "root-x86-64-verity-sig") | .size')
+signature_json="$verify_home/sysext-signature.json"
+signature_der="$verify_home/sysext-signature.der"
+signature_cert="$verify_home/sysext-signature.crt"
+root_hash="$verify_home/sysext-root-hash"
+if [ -z "$signature_start" ] || [ -z "$signature_size" ]; then
+    printf '%s\n' 'System extension signature partition is missing.' >&2
+    exit 1
+fi
+dd if="$extension_artifact" bs=512 skip="$signature_start" \
+    count="$signature_size" status=none | tr -d '\000' >"$signature_json"
+jq -r .signature "$signature_json" | base64 -d >"$signature_der"
+printf '%s' "$(jq -r .rootHash "$signature_json")" >"$root_hash"
+if ! openssl cms -verify -binary -inform DER -in "$signature_der" \
+        -content "$root_hash" -CAfile "$secureboot_cert" -purpose any \
+        -out /dev/null; then
+    printf '%s\n' 'System extension verity signature is not trusted.' >&2
+    exit 1
+fi
+openssl pkcs7 -inform DER -in "$signature_der" -print_certs \
+    -out "$signature_cert"
+embedded_fingerprint=$(openssl x509 -in "$signature_cert" -noout \
+    -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+expected_fingerprint=$(openssl x509 -in "$release/sysext.crt" -noout \
+    -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+declared_fingerprint=$(jq -r .certificateFingerprint "$signature_json")
+if [ "$embedded_fingerprint" != "$expected_fingerprint" ] || \
+   [ "$declared_fingerprint" != "$expected_fingerprint" ]; then
+    printf '%s\n' 'System extension signer does not match packaged trust.' >&2
+    exit 1
+fi
 if ! sbverify --cert "$secureboot_cert" "$uki_artifact" \
     >/dev/null; then
     printf '%s\n' 'UKI is not signed by the configured Secure Boot key.' >&2
     exit 1
 fi
-if [ "$variant" = fleet ] && \
+if { [ "$variant" = fleet ] || [ "$variant" = playground ]; } && \
    ! openssl verify -CAfile "$secureboot_cert" "$release/sysext.crt"; then
-    printf '%s\n' 'Fleet sysext certificate is not authorized by Secure Boot trust.' >&2
+    printf '%s\n' \
+        'System extension certificate is not authorized by Secure Boot trust.' >&2
     exit 1
 fi
 
@@ -146,9 +193,6 @@ image="$release/$output.raw.zst"
 raw=$(mktemp --suffix=.raw)
 trap 'rm -rf "$verify_home" "$raw"' EXIT HUP INT TERM
 zstd --long=31 --decompress --stdout "$image" >"$raw"
-
-sfdisk=${SFDISK:-$(command -v sfdisk || true)}
-[ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk
 
 root_uuid=$("$sfdisk" --part-uuid "$raw" 2 | tr '[:upper:]' '[:lower:]')
 verity_uuid=$("$sfdisk" --part-uuid "$raw" 3 | tr '[:upper:]' '[:lower:]')
@@ -190,11 +234,17 @@ else
     exit 1
 fi
 printf '%s\n' "$dissection"
-if [ "$variant" = fleet ]; then
-    if ! printf '%s\n' "$dissection" | \
-        grep -q 'IMAGE_ID=carbideos-fleet' || \
-       ! printf '%s\n' "$dissection" | grep -q 'VARIANT_ID=fleet'; then
-        printf '%s\n' 'Fleet image identity is missing or incorrect.' >&2
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    expected_id=carbideos-fleet
+    expected_variant=fleet
+    if [ "$variant" = playground ]; then
+        expected_id=carbideos-playground
+        expected_variant=playground
+    fi
+    if ! printf '%s\n' "$dissection" | grep -q "IMAGE_ID=$expected_id" || \
+       ! printf '%s\n' "$dissection" | \
+            grep -q "VARIANT_ID=$expected_variant"; then
+        printf '%s image identity is missing or incorrect.\n' "$variant" >&2
         exit 1
     fi
 fi

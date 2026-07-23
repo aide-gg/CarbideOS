@@ -5,9 +5,9 @@ set -eu
 cd "$(dirname "$0")/.."
 
 passphrase=$(systemd-ask-password \
-    'CarbideOS production signing passphrase:')
+    'CarbideOS Playground signing passphrase:')
 if [ -z "$passphrase" ]; then
-    printf '%s\n' 'The production signing passphrase cannot be empty.' >&2
+    printf '%s\n' 'The Playground signing passphrase cannot be empty.' >&2
     exit 1
 fi
 export CARBIDEOS_SIGNING_KEY_PASSPHRASE="$passphrase"
@@ -16,8 +16,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-./scripts/build --fleet
-./extensions/rat-game-16/build --fleet
-./scripts/package --fleet
-./scripts/sign --fleet
-./scripts/verify --fleet
+./scripts/build --playground
+./extensions/rat-game-16/build --playground
+./scripts/package --playground
+./scripts/sign --playground
+./scripts/verify --playground

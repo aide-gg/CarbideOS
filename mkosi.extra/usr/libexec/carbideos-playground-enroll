@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+printf '\n%s\n\n' 'CarbideOS Playground first-boot enrollment'
+while :; do
+    printf '%s' 'Choose a local username: '
+    IFS= read -r username
+    if printf '%s\n' "$username" | \
+        grep -Eq '^[a-z_][a-z0-9_-]{0,30}$' && \
+       ! getent passwd "$username" >/dev/null; then
+        break
+    fi
+    printf '%s\n' 'Use a new lowercase username (letters, numbers, _ or -).'
+done
+
+while :; do
+    password=$(systemd-ask-password --echo=masked \
+        "Password for $username:")
+    confirmation=$(systemd-ask-password --echo=masked \
+        'Confirm password:')
+    if [ -n "$password" ] && [ "$password" = "$confirmation" ]; then
+        break
+    fi
+    unset password confirmation
+    printf '%s\n' 'Passwords are empty or do not match. Try again.'
+done
+unset confirmation
+
+NEWPASSWORD="$password" homectl create "$username" \
+    --storage=subvolume \
+    --shell=/bin/bash \
+    --member-of=carbide-operator \
+    --password-change-now=no \
+    -P
+unset password
+
+install -d -m 0700 /var/lib/carbideos
+touch /var/lib/carbideos/playground-enrolled
+chmod 0600 /var/lib/carbideos/playground-enrolled
+printf '\nAccount created. Sign in as %s.\n\n' "$username"
