@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+if [ "${container:-}" != mkosi ]; then
+    exec mkosi-chroot "$CHROOT_SCRIPT" "$@"
+fi
+
+sed -i "s/@IMAGE_VERSION@/$IMAGE_VERSION/g" /usr/lib/os-release
+base64 -d /usr/share/carbideos/import-pubring.pgp.b64 \
+    >/usr/lib/systemd/import-pubring.pgp
+
+# NvPCR policies are not used yet. Leaving Fedora's defaults installed makes
+# systemd-tpm2-setup persist an unnecessary anchor credential to the ESP.
+rm -f /usr/lib/nvpcr/*.nvpcr
+checkmodule -M -m -o /tmp/carbideos_boot.mod \
+    /usr/share/selinux/packages/carbideos-boot.te
+semodule_package -o /tmp/carbideos_boot.pp -m /tmp/carbideos_boot.mod
+semodule -i /tmp/carbideos_boot.pp
+rm -f /tmp/carbideos_boot.mod /tmp/carbideos_boot.pp
+
+if [ "${CARBIDEOS_DEBUG:-0}" = 1 ]; then
+    password=$(cat /usr/lib/carbideos/ace-mgmt.password)
+    printf 'root:%s\n' "$password" | chpasswd
+    unset password
+    sed -i \
+        -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"CarbideOS $IMAGE_VERSION (Debug)\"/" \
+        -e 's/^IMAGE_ID=.*/IMAGE_ID=carbideos-debug/' \
+        /usr/lib/os-release
+    printf '%s\n' 'VARIANT="Debug"' 'VARIANT_ID=debug' >>/usr/lib/os-release
+else
+    passwd --lock root
+fi
+
+authselect enable-feature with-systemd-homed
+
+systemctl enable sshd.service systemd-homed.service systemd-networkd.service \
+    systemd-resolved.service systemd-userdbd.socket \
+    carbideos-home-init.service carbideos-homed-activate.service \
+    carbideos-repart.service \
+    carbideos-sshd-keygen.service carbideos-var-init.service home.mount \
+    var.mount var-lib-carbideos-workload.mount
+systemctl mask systemd-homed-firstboot.service ssh-host-keys-migration.service \
+    sshd-keygen@.service systemd-pcrproduct.service getty@tty2.service \
+    getty@tty3.service getty@tty4.service getty@tty5.service \
+    getty@tty6.service
+
+# These services are pulled in by Fedora's systemd-container package, which is
+# needed for systemd-pull, but CarbideOS does not expose their APIs.
+for unit in \
+    systemd-importd.service \
+    systemd-machined.service \
+    systemd-nsresourced.service \
+    systemd-nsresourced.socket; do
+    ln -sf /dev/null "/etc/systemd/system/$unit"
+done
+
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf

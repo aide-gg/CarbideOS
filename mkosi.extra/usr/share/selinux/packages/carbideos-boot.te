@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+module carbideos_boot 1.0;
+
+require {
+    type dosfs_t;
+    type init_t;
+    class dir { add_name remove_name write };
+    class file rename;
+}
+
+# systemd-bless-boot removes boot-count suffixes from UKIs on the ESP.
+allow init_t dosfs_t:dir { add_name remove_name write };
+allow init_t dosfs_t:file rename;

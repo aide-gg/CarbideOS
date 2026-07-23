@@ -1,0 +1,25 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+for argument in "$@"; do
+    case "$argument" in
+        -d|--decompress|-t|--test|-l|--list)
+            exec /usr/bin/zstd --long=31 "$@"
+            ;;
+        -h|--help|-H|--help-hidden|-V|--version)
+            exec /usr/bin/zstd "$@"
+            ;;
+    esac
+done
+
+# A 2 GiB frame window in the UKI initrd would require that much memory before
+# userspace starts. Keep maximum compression there, but use the normal window.
+input=$(readlink /proc/self/fd/0 2>/dev/null || true)
+case "$input" in
+    *initrd.cpio*)
+        exec /usr/bin/zstd "$@"
+        ;;
+esac
+
+exec /usr/bin/zstd --long=31 "$@"

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Initialize persistent CarbideOS system state
+DefaultDependencies=no
+Requires=var.mount
+After=var.mount
+Before=local-fs.target
+Before=home.mount
+Before=var-lib-carbideos-workload.mount
+Before=systemd-journal-flush.service systemd-logind.service
+Before=systemd-networkd-persistent-storage.service systemd-random-seed.service
+Before=systemd-tpm2-setup.service carbideos-sshd-keygen.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-tmpfiles --create --prefix=/var
+ExecStart=/usr/bin/chcon system_u:object_r:home_root_t:s0 /var/.home
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

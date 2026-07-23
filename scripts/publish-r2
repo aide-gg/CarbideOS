@@ -1,0 +1,229 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+limit=5000000000
+CARBIDEOS_R2_ENDPOINT=${CARBIDEOS_R2_ENDPOINT:-https://ef3f312260e602feb99ad7481f7a00e4.r2.cloudflarestorage.com}
+CARBIDEOS_R2_BUCKET=${CARBIDEOS_R2_BUCKET:-aidegg-updates}
+export CARBIDEOS_R2_ENDPOINT CARBIDEOS_R2_BUCKET
+
+if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then
+    printf 'Usage: %s UPDATE_DIRECTORY\n' "$0" >&2
+    exit 2
+fi
+
+for command in aws gpg jq; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+profile=${CARBIDEOS_R2_PROFILE:-}
+if [ -z "$profile" ]; then
+    for variable in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+        eval "value=\${$variable:-}"
+        if [ -z "$value" ]; then
+            printf 'Missing %s or CARBIDEOS_R2_PROFILE.\n' "$variable" >&2
+            exit 1
+        fi
+    done
+fi
+
+source=$(realpath "$1")
+prefix=${CARBIDEOS_R2_PREFIX:-carbideos}
+prefix=${prefix#/}
+prefix=${prefix%/}
+export AWS_DEFAULT_REGION=auto
+# R2 does not accept the optional checksum headers emitted by newer AWS CLI
+# releases for PutObject, even though it supports standard SigV4 uploads.
+export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
+export AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED
+
+aws_r2() {
+    if [ -n "$profile" ]; then
+        aws --profile "$profile" --endpoint-url "$CARBIDEOS_R2_ENDPOINT" "$@"
+    else
+        aws --endpoint-url "$CARBIDEOS_R2_ENDPOINT" "$@"
+    fi
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+remote="$work/remote.json"
+local_files="$work/local-files"
+normal_files="$work/normal-files"
+remote_sums="$work/remote-SHA256SUMS"
+remote_signature="$work/remote-SHA256SUMS.gpg"
+
+if [ ! -f "$source/SHA256SUMS" ] || [ ! -f "$source/SHA256SUMS.gpg" ]; then
+    printf '%s\n' 'Update directory must contain SHA256SUMS and SHA256SUMS.gpg.' >&2
+    exit 1
+fi
+
+GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --verify \
+    "$source/SHA256SUMS.gpg" "$source/SHA256SUMS"
+(
+    cd "$source"
+    sha256sum --check --strict SHA256SUMS
+)
+
+aws_r2 s3api list-objects-v2 \
+    --bucket "$CARBIDEOS_R2_BUCKET" --output json >"$remote"
+
+remote_manifest_valid=0
+manifest_key=SHA256SUMS
+signature_key=SHA256SUMS.gpg
+if [ -n "$prefix" ]; then
+    manifest_key="$prefix/$manifest_key"
+    signature_key="$prefix/$signature_key"
+fi
+if aws_r2 s3 cp "s3://$CARBIDEOS_R2_BUCKET/$manifest_key" \
+       "$remote_sums" --no-progress --only-show-errors 2>/dev/null && \
+   aws_r2 s3 cp "s3://$CARBIDEOS_R2_BUCKET/$signature_key" \
+       "$remote_signature" --no-progress --only-show-errors 2>/dev/null && \
+   GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --verify \
+       "$remote_signature" "$remote_sums" >/dev/null 2>&1; then
+    remote_manifest_valid=1
+fi
+
+current=$(jq '[.Contents[]?.Size] | add // 0' "$remote")
+if [ "$current" -gt "$limit" ]; then
+    printf 'R2 bucket is already over the 5 GB limit: %s bytes.\n' "$current" >&2
+    exit 1
+fi
+
+find "$source" -type f -printf '%P\t%s\n' | LC_ALL=C sort >"$local_files"
+if [ ! -s "$local_files" ]; then
+    printf 'Update directory is empty: %s\n' "$source" >&2
+    exit 1
+fi
+
+local_total=0
+replaced_total=0
+tab=$(printf '\t')
+while IFS="$tab" read -r relative size; do
+    case "$relative" in
+        SHA256SUMS|SHA256SUMS.gpg|carbideos_*.efi|\
+        carbideos_*.root.raw.zst|carbideos_*.verity.raw.zst|\
+        carbideos_*.verity-sig.raw.zst)
+            ;;
+        *)
+            printf 'Refusing unexpected update-feed file: %s\n' \
+                "$relative" >&2
+            exit 1
+            ;;
+    esac
+    case "$relative" in
+        *"$tab"*|*'\n'*)
+            printf 'Unsupported update filename: %s\n' "$relative" >&2
+            exit 1
+            ;;
+    esac
+    key=$relative
+    [ -n "$prefix" ] && key="$prefix/$relative"
+    existing=$(jq --arg key "$key" \
+        '[.Contents[]? | select(.Key == $key) | .Size][0] // 0' "$remote")
+    local_total=$((local_total + size))
+    replaced_total=$((replaced_total + existing))
+done <"$local_files"
+
+projected=$((current - replaced_total + local_total))
+if [ "$projected" -gt "$limit" ]; then
+    printf '%s\n' 'Refusing R2 publish: projected bucket size exceeds 5 GB.' >&2
+    printf 'Current:   %s bytes\n' "$current" >&2
+    printf 'Projected: %s bytes\n' "$projected" >&2
+    printf 'Limit:     %s bytes\n' "$limit" >&2
+    exit 1
+fi
+
+# The signed checksum manifest is the release activation point. Upload all
+# payloads first, its detached signature second, and SHA256SUMS last.
+awk -F '\t' '$1 != "SHA256SUMS" && $1 != "SHA256SUMS.gpg" { print }' \
+    "$local_files" >"$normal_files"
+
+upload() {
+    relative=$1
+    key=$relative
+    [ -n "$prefix" ] && key="$prefix/$relative"
+
+    case "$relative" in
+        SHA256SUMS|SHA256SUMS.gpg)
+            cache_control='no-cache'
+            ;;
+        *)
+            cache_control='public, max-age=31536000, immutable'
+            ;;
+    esac
+
+    case "$relative" in
+        *.efi) content_type=application/vnd.microsoft.portable-executable ;;
+        *.json|*.manifest) content_type=application/json ;;
+        *.gpg) content_type=application/pgp-signature ;;
+        *.zst) content_type=application/zstd ;;
+        *) content_type=application/octet-stream ;;
+    esac
+
+    printf 'Uploading %s\n' "$key"
+    aws_r2 s3 cp \
+        "$source/$relative" "s3://$CARBIDEOS_R2_BUCKET/$key" \
+        --no-progress --only-show-errors \
+        --cache-control "$cache_control" --content-type "$content_type"
+}
+
+unchanged_payload() {
+    relative=$1
+    size=$2
+    [ "$remote_manifest_valid" -eq 1 ] || return 1
+
+    key=$relative
+    [ -n "$prefix" ] && key="$prefix/$relative"
+    existing=$(jq --arg key "$key" \
+        '[.Contents[]? | select(.Key == $key) | .Size][0] // 0' "$remote")
+    [ "$existing" -eq "$size" ] || return 1
+
+    local_hash=$(awk -v file="$relative" \
+        'substr($0, 67) == file { print substr($0, 1, 64); exit }' \
+        "$source/SHA256SUMS")
+    remote_hash=$(awk -v file="$relative" \
+        'substr($0, 67) == file { print substr($0, 1, 64); exit }' \
+        "$remote_sums")
+    [ -n "$local_hash" ] && [ "$local_hash" = "$remote_hash" ]
+}
+
+while IFS="$tab" read -r relative size; do
+    if unchanged_payload "$relative" "$size"; then
+        printf 'Skipping unchanged %s/%s\n' "$prefix" "$relative"
+    else
+        key=$relative
+        [ -n "$prefix" ] && key="$prefix/$relative"
+        existing=$(jq --arg key "$key" \
+            '[.Contents[]? | select(.Key == $key) | .Size][0] // 0' \
+            "$remote")
+        if [ "$existing" -ne 0 ]; then
+            printf 'Refusing to replace immutable update payload: %s\n' \
+                "$key" >&2
+            exit 1
+        fi
+        upload "$relative"
+    fi
+done <"$normal_files"
+
+if grep -q "^SHA256SUMS.gpg${tab}" "$local_files"; then
+    upload SHA256SUMS.gpg
+fi
+if grep -q "^SHA256SUMS${tab}" "$local_files"; then
+    upload SHA256SUMS
+fi
+
+final=$(aws_r2 s3api list-objects-v2 \
+    --bucket "$CARBIDEOS_R2_BUCKET" --output json | \
+    jq '[.Contents[]?.Size] | add // 0')
+if [ "$final" -gt "$limit" ]; then
+    printf 'R2 bucket exceeded the 5 GB limit after upload: %s bytes.\n' \
+        "$final" >&2
+    exit 1
+fi
+
+printf 'Published %s to r2://%s/%s (%s/%s bytes used).\n' \
+    "$source" "$CARBIDEOS_R2_BUCKET" "$prefix" "$final" "$limit"

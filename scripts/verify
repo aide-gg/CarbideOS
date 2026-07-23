@@ -1,0 +1,150 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+version=$(tr -d '[:space:]' <mkosi.version)
+release="$PWD/dist/carbideos-${version}"
+update_feed="$PWD/dist/update-feed"
+verify_home=$(mktemp -d)
+trap 'rm -rf "$verify_home"' EXIT HUP INT TERM
+
+if [ -e mkosi.extra/usr/lib/carbideos/authorized_keys/ace-mgmt ]; then
+    printf '%s\n' 'The source tree must not contain an authorized admin key.' >&2
+    exit 1
+fi
+if [ "$(stat -c '%a' keys/admin/ace-mgmt.pub)" -gt 644 ] || \
+   [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; then
+    printf '%s\n' 'Local admin credential inputs have unsafe modes.' >&2
+    exit 1
+fi
+if grep -Eq '^(PasswordAuthentication yes|AllowUsers .*ace-bootstrap)' \
+    mkosi.extra/etc/ssh/sshd_config.d/10-carbideos.conf; then
+    printf '%s\n' 'Production SSH configuration enables a migration login.' >&2
+    exit 1
+fi
+if ! grep -Fqx 'exec env PASSWORD="$password" homectl with ace-mgmt /usr/bin/sleep infinity' \
+    mkosi.extra/usr/libexec/carbideos-homed-activate || \
+   ! grep -Fqx 'Type=simple' \
+    mkosi.extra/usr/lib/systemd/system/carbideos-homed-activate.service; then
+    printf '%s\n' 'Homed activation must retain a boot-long home reference.' >&2
+    exit 1
+fi
+if ! grep -qx 'Mode=0600' \
+    mkosi.extra/usr/lib/sysupdate.d/90-uki.transfer; then
+    printf '%s\n' 'UKI transfer must remain root-writable for boot counting.' >&2
+    exit 1
+fi
+
+GNUPGHOME="$verify_home" gpg --batch --import \
+    "$release/release-signing.pub.asc" >/dev/null 2>&1
+GNUPGHOME="$verify_home" gpg --batch --verify \
+    "$release/SHA256SUMS.asc" "$release/SHA256SUMS"
+GNUPGHOME="$verify_home" gpg --batch --verify \
+    "$update_feed/SHA256SUMS.gpg" "$update_feed/SHA256SUMS"
+
+(
+    cd "$release"
+    sha256sum --check --strict SHA256SUMS
+)
+if ! grep -q '"name": "systemd-container"' \
+    "$release/carbideos.manifest"; then
+    printf '%s\n' 'Release is missing systemd-pull (Fedora systemd-container).' >&2
+    exit 1
+fi
+if ! grep -q '"name": "gnupg2"' "$release/carbideos.manifest"; then
+    printf '%s\n' 'Release is missing gpg for signed update verification.' >&2
+    exit 1
+fi
+if ! grep -q '"name": "systemd-pam"' "$release/carbideos.manifest"; then
+    printf '%s\n' 'Release is missing PAM integration for systemd-homed.' >&2
+    exit 1
+fi
+(
+    cd "$update_feed"
+    sha256sum --check --strict SHA256SUMS
+)
+
+for command in jq sbverify sfdisk systemd-dissect zstd; do
+    if ! command -v "$command" >/dev/null 2>&1 && \
+       [ ! -x "/usr/sbin/$command" ]; then
+        printf 'Missing required verification command: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+for pattern in \
+    "carbideos_${version}.efi" \
+    "carbideos_${version}_"'*.root.raw.zst' \
+    "carbideos_${version}_"'*.verity.raw.zst' \
+    "carbideos_${version}.verity-sig.raw.zst"; do
+    # The patterns intentionally expand to exactly one update artifact.
+    # shellcheck disable=SC2086
+    set -- "$update_feed"/$pattern
+    if [ "$#" -ne 1 ] || [ ! -s "$1" ]; then
+        printf 'Missing or ambiguous sysupdate artifact: %s\n' "$pattern" >&2
+        exit 1
+    fi
+done
+
+set -- "$update_feed"/"carbideos_${version}_"*.root.raw.zst
+root_artifact=$1
+set -- "$update_feed"/"carbideos_${version}_"*.verity.raw.zst
+verity_artifact=$1
+verity_sig_artifact="$update_feed/carbideos_${version}.verity-sig.raw.zst"
+uki_artifact="$update_feed/carbideos_${version}.efi"
+if ! sbverify --cert keys/secureboot/secure-boot.crt "$uki_artifact" \
+    >/dev/null; then
+    printf '%s\n' 'UKI is not signed by the configured Secure Boot key.' >&2
+    exit 1
+fi
+
+image="$release/carbideos.raw.zst"
+raw=$(mktemp --suffix=.raw)
+trap 'rm -rf "$verify_home" "$raw"' EXIT HUP INT TERM
+zstd --long=31 --decompress --stdout "$image" >"$raw"
+
+sfdisk=${SFDISK:-$(command -v sfdisk || true)}
+[ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk
+
+root_uuid=$("$sfdisk" --part-uuid "$raw" 2 | tr '[:upper:]' '[:lower:]')
+verity_uuid=$("$sfdisk" --part-uuid "$raw" 3 | tr '[:upper:]' '[:lower:]')
+if [ "$(basename "$root_artifact")" != \
+    "carbideos_${version}_${root_uuid}.root.raw.zst" ]; then
+    printf '%s\n' 'Root artifact filename does not contain its GPT UUID.' >&2
+    exit 1
+fi
+if [ "$(basename "$verity_artifact")" != \
+    "carbideos_${version}_${verity_uuid}.verity.raw.zst" ]; then
+    printf '%s\n' 'Verity artifact filename does not contain its GPT UUID.' >&2
+    exit 1
+fi
+
+root_size=$(zstd --long=31 -qdc "$root_artifact" | wc -c)
+verity_size=$(zstd --long=31 -qdc "$verity_artifact" | wc -c)
+verity_sig_size=$(zstd --long=31 -qdc "$verity_sig_artifact" | wc -c)
+if [ "$root_size" -gt $((768 * 1024 * 1024)) ] || \
+   [ "$verity_size" -gt $((32 * 1024 * 1024)) ] || \
+   [ "$verity_sig_size" -ne $((16 * 1024)) ]; then
+    printf '%s\n' 'An update artifact exceeds its inactive partition slot.' >&2
+    exit 1
+fi
+
+esp_size=$("$sfdisk" --json "$raw" | jq -r \
+    '.partitiontable as $t | ($t.partitions[0].size * $t.sectorsize)')
+uki_size=$(wc -c <"$uki_artifact")
+if [ $((uki_size * 2 + 16 * 1024 * 1024)) -gt "$esp_size" ]; then
+    printf '%s\n' 'ESP cannot retain two current-sized UKIs with 16 MiB free.' >&2
+    exit 1
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+    systemd-dissect "$raw"
+elif command -v sudo >/dev/null 2>&1; then
+    sudo systemd-dissect "$raw"
+else
+    printf '%s\n' 'sudo is required for partition metadata inspection.' >&2
+    exit 1
+fi
+
+printf 'Verified CarbideOS %s release.\n' "$version"

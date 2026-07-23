@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Neofetch is archived; retain its command name while using maintained fastfetch.
+exec /usr/bin/fastfetch "$@"

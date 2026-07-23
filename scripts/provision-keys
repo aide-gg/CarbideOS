@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+umask 077
+
+if [ -e keys ]; then
+    printf '%s\n' 'keys/ already exists; refusing to overwrite signing material' >&2
+    exit 1
+fi
+
+mkdir -p keys/secureboot keys/verity keys/manifest/gnupg keys/admin
+
+openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
+    -subj '/CN=CarbideOS Development Secure Boot/' \
+    -keyout keys/secureboot/secure-boot.key \
+    -out keys/secureboot/secure-boot.crt
+
+openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes -days 3650 \
+    -subj '/CN=CarbideOS Development Verity/' \
+    -keyout keys/verity/verity.key \
+    -out keys/verity/verity.crt
+
+GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --passphrase '' \
+    --quick-generate-key 'CarbideOS Development Release <release@carbideos.invalid>' \
+    ed25519 sign 2y
+GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --armor --export \
+    'CarbideOS Development Release' >keys/manifest/release-signing.pub.asc
+
+chmod 0600 keys/secureboot/secure-boot.key keys/verity/verity.key
+chmod 0700 keys/manifest/gnupg
+
+printf '%s\n' 'Development signing keys provisioned under gitignored keys/.'
+printf '%s\n' 'Back them up securely; losing these keys prevents trusted updates.'
+printf '%s\n' 'Before building, install an SSH public key at keys/admin/ace-mgmt.pub'
+printf '%s\n' 'and a mode-0600 password file at keys/admin/ace-mgmt.password.'

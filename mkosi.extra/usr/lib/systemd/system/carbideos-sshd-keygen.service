@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Generate persistent CarbideOS SSH host keys
+After=var.mount
+Requires=var.mount
+Before=sshd.service
+ConditionPathExists=!/var/lib/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/carbideos-sshd-keygen
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

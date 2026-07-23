@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=CarbideOS persistent home storage
+Requires=carbideos-var-init.service
+After=carbideos-var-init.service
+Before=local-fs.target
+
+[Mount]
+What=/var/.home
+Where=/home
+Type=none
+Options=bind,noexec,nosuid,nodev
+
+[Install]
+WantedBy=local-fs.target

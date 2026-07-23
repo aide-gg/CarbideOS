@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Initialize persistent CarbideOS home storage
+Requires=home.mount
+After=home.mount
+Before=systemd-homed.service sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-tmpfiles --create --prefix=/home
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

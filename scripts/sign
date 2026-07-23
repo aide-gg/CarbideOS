@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+version=$(tr -d '[:space:]' <mkosi.version)
+release="$PWD/dist/carbideos-${version}"
+update_feed="$PWD/dist/update-feed"
+gnupg="$PWD/keys/manifest/gnupg"
+
+if [ ! -d "$release" ]; then
+    printf '%s\n' 'No packaged release found; run make package first.' >&2
+    exit 1
+fi
+if [ ! -d "$update_feed" ]; then
+    printf '%s\n' 'No update feed found; run make package first.' >&2
+    exit 1
+fi
+
+(
+    cd "$release"
+    find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' \
+        | LC_ALL=C sort \
+        | xargs -r sha256sum >SHA256SUMS
+)
+
+GNUPGHOME="$gnupg" gpg --batch --yes --armor --detach-sign \
+    --local-user 'CarbideOS Development Release' \
+    --output "$release/SHA256SUMS.asc" "$release/SHA256SUMS"
+
+(
+    cd "$update_feed"
+    find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' \
+        | LC_ALL=C sort \
+        | xargs -r sha256sum >SHA256SUMS
+)
+GNUPGHOME="$gnupg" gpg --batch --yes --detach-sign \
+    --local-user 'CarbideOS Development Release' \
+    --output "$update_feed/SHA256SUMS.gpg" "$update_feed/SHA256SUMS"
+
+printf 'Signed release manifest: %s/SHA256SUMS.asc\n' "$release"
+printf 'Signed sysupdate manifest: %s/SHA256SUMS.gpg\n' "$update_feed"

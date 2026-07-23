@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+password=$(cat /usr/lib/carbideos/ace-mgmt.password)
+if ! homectl inspect ace-mgmt >/dev/null 2>&1; then
+    key=$(cat /usr/lib/carbideos/authorized_keys/ace-mgmt)
+    NEWPASSWORD=$password homectl create ace-mgmt \
+        --storage=subvolume \
+        --shell=/bin/bash \
+        --member-of=wheel \
+        --password-change-now=no \
+        --ssh-authorized-keys="$key" \
+        -P
+fi
+
+exec env PASSWORD="$password" homectl with ace-mgmt /usr/bin/sleep infinity

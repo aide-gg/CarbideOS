@@ -1,0 +1,77 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+version=$(tr -d '[:space:]' <mkosi.version)
+release="dist/carbideos-${version}"
+update_feed="dist/update-feed"
+
+if [ ! -d mkosi.output ]; then
+    printf '%s\n' 'No mkosi output found; run make build first.' >&2
+    exit 1
+fi
+
+rm -rf "$release"
+mkdir -p "$release"
+mkdir -p "$update_feed"
+find "$update_feed" -maxdepth 1 -type f \
+    \( -name "carbideos_${version}.*" -o -name "carbideos_${version}_*" \
+       -o -name 'SHA256SUMS' -o -name 'SHA256SUMS.gpg' \) -delete
+
+for artifact in \
+    mkosi.output/carbideos.raw.zst \
+    mkosi.output/carbideos.efi \
+    mkosi.output/carbideos.esp.raw.zst \
+    mkosi.output/carbideos.root-x86-64.raw.zst \
+    mkosi.output/carbideos.root-x86-64-verity.raw.zst \
+    mkosi.output/carbideos.root-x86-64-verity-sig.raw.zst \
+    mkosi.output/carbideos.manifest; do
+    if [ ! -s "$artifact" ]; then
+        printf 'Missing required artifact: %s\n' "$artifact" >&2
+        exit 1
+    fi
+    cp --preserve=mode,timestamps "$artifact" "$release/"
+done
+cp keys/manifest/release-signing.pub.asc "$release/"
+cp keys/secureboot/secure-boot.crt "$release/secure-boot.crt"
+cp keys/verity/verity.crt "$release/verity.crt"
+
+raw=$(mktemp --suffix=.raw)
+verity_sig_raw=$(mktemp --suffix=.verity-sig.raw)
+trap 'rm -f "$raw" "$verity_sig_raw"' EXIT HUP INT TERM
+zstd --long=31 --decompress --stdout mkosi.output/carbideos.raw.zst >"$raw"
+sfdisk=${SFDISK:-$(command -v sfdisk || true)}
+[ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk
+if [ ! -x "$sfdisk" ]; then
+    printf '%s\n' 'sfdisk is required to package sysupdate artifacts.' >&2
+    exit 1
+fi
+root_uuid=$("$sfdisk" --part-uuid "$raw" 2 | tr '[:upper:]' '[:lower:]')
+verity_uuid=$("$sfdisk" --part-uuid "$raw" 3 | tr '[:upper:]' '[:lower:]')
+
+cp --preserve=mode,timestamps mkosi.output/carbideos.efi \
+    "$update_feed/carbideos_${version}.efi"
+zstd --long=31 --decompress --stdout \
+    mkosi.output/carbideos.root-x86-64.raw.zst \
+    | zstd --compress --quiet --force \
+        -o "$update_feed/carbideos_${version}_${root_uuid}.root.raw.zst"
+zstd --long=31 --decompress --stdout \
+    mkosi.output/carbideos.root-x86-64-verity.raw.zst \
+    | zstd --compress --quiet --force \
+        -o "$update_feed/carbideos_${version}_${verity_uuid}.verity.raw.zst"
+zstd --long=31 --decompress --stdout \
+    mkosi.output/carbideos.root-x86-64-verity-sig.raw.zst \
+    >"$verity_sig_raw"
+truncate -s 16K "$verity_sig_raw"
+zstd --compress --quiet --force "$verity_sig_raw" \
+    -o "$update_feed/carbideos_${version}.verity-sig.raw.zst"
+
+if ! find "$release" -maxdepth 1 -type f -name '*.raw.zst' | grep -q .; then
+    printf '%s\n' 'Packaged release does not contain a compressed disk image.' >&2
+    exit 1
+fi
+
+printf 'Packaged CarbideOS %s in %s\n' "$version" "$release"
+printf 'Prepared CarbideOS %s update artifacts in %s\n' \
+    "$version" "$update_feed"

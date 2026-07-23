@@ -1,0 +1,95 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+debug=no
+case "${1-}" in
+    '') ;;
+    --debug)
+        debug=yes
+        ;;
+    *)
+        printf 'Usage: %s [--debug]\n' "$0" >&2
+        exit 2
+        ;;
+esac
+if [ "$#" -gt 1 ]; then
+    printf 'Usage: %s [--debug]\n' "$0" >&2
+    exit 2
+fi
+
+for file in \
+    keys/secureboot/secure-boot.key \
+    keys/secureboot/secure-boot.crt \
+    keys/verity/verity.key \
+    keys/verity/verity.crt \
+    keys/manifest/release-signing.pub.asc \
+    keys/admin/ace-mgmt.pub \
+    keys/admin/ace-mgmt.password; do
+    if [ ! -s "$file" ]; then
+        printf 'Missing %s; run make keys first.\n' "$file" >&2
+        exit 1
+    fi
+done
+
+if [ "$(stat -c '%a' keys/secureboot/secure-boot.key)" -gt 600 ] || \
+   [ "$(stat -c '%a' keys/verity/verity.key)" -gt 600 ]; then
+    printf '%s\n' 'Private signing keys must not be group/world accessible.' >&2
+    exit 1
+fi
+
+if [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; then
+    printf '%s\n' 'The admin password file must not be group/world accessible.' >&2
+    exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        printf '%s\n' 'Building an enforcing SELinux image requires root.' >&2
+        exit 1
+    fi
+    printf '%s\n' 'Elevating mkosi so Fedora SELinux labels can be applied.'
+    exec sudo "$PWD/scripts/build" "$@"
+fi
+
+# Replace only CarbideOS artifacts. Keep mkosi.output/tools so the large Debian
+# tools environment is reused across image rebuilds.
+output=carbideos
+[ "$debug" = yes ] && output=carbideos-debug
+if [ -d mkosi.output ]; then
+    find mkosi.output -maxdepth 1 \( -type f -o -type l \) \
+        -name "$output.*" -delete
+fi
+
+extra=$(mktemp -d)
+trap 'rm -rf "$extra"' EXIT HUP INT TERM
+install -d -m 0755 "$extra/usr/lib/carbideos/authorized_keys"
+install -m 0644 keys/admin/ace-mgmt.pub \
+    "$extra/usr/lib/carbideos/authorized_keys/ace-mgmt"
+install -m 0600 keys/admin/ace-mgmt.password \
+    "$extra/usr/lib/carbideos/ace-mgmt.password"
+
+if [ "$debug" = yes ]; then
+    printf '%s\n' 'Building CarbideOS debug image with root password enabled.'
+    mkosi --extra-tree="$extra" \
+        --output=carbideos-debug --hostname=carbideos-debug \
+        --environment=CARBIDEOS_DEBUG=1 build
+
+    debug_release=dist/debug
+    install -d "$debug_release"
+    cp --preserve=mode,timestamps mkosi.output/carbideos-debug.raw.zst \
+        "$debug_release/"
+    (
+        cd "$debug_release"
+        sha256sum carbideos-debug.raw.zst >SHA256SUMS
+    )
+    if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+        chown -R "$SUDO_UID:$SUDO_GID" "$debug_release"
+    fi
+    printf 'Published CarbideOS debug image in %s\n' "$debug_release"
+    exit 0
+fi
+
+mkosi --extra-tree="$extra" build

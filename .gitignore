@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Build products
+/.mkosi-private/
+/mkosi.cache/
+/mkosi.output/
+/mkosi.pkgcache/
+/mkosi.workspace/
+/dist/
+
+# Private local signing material and generated mkosi overrides
+/keys/
+/mkosi.local.conf
+/mkosi.local.conf.d/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+*.credentials
+/credentials/
+
+# Internal product and fleet architecture
+/SPEC.MD
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

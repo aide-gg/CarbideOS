@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+enable carbideos-repart.service
+enable carbideos-home-init.service
+enable carbideos-homed-activate.service
+enable carbideos-sshd-keygen.service
+enable carbideos-var-init.service
+enable getty@tty1.service
+enable home.mount
+disable ssh-host-keys-migration.service
+disable sshd-keygen@.service
+enable sshd.service
+enable systemd-networkd.service
+enable systemd-resolved.service
+enable var.mount
+enable var-lib-carbideos-workload.mount
+enable systemd-homed.service
+disable systemd-importd.service
+disable systemd-machined.service
+disable systemd-nsresourced.socket
+enable systemd-userdbd.socket

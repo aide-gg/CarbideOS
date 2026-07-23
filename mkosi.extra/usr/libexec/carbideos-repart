@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+state=/dev/disk/by-partlabel/carbideos_state
+had_state=no
+[ -e "$state" ] && had_state=yes
+
+root_source=$(findmnt --noheadings --output SOURCE /)
+disk=$(lsblk --inverse --raw --noheadings --paths --output NAME,TYPE \
+    "$root_source" | \
+    awk '$2 == "disk" { print $1; exit }')
+if [ -z "$disk" ]; then
+    printf 'Unable to determine backing disk for %s.\n' "$root_source" >&2
+    exit 1
+fi
+
+# Imported raw images retain their backup GPT at the original image boundary.
+sfdisk --no-reread --no-tell-kernel --relocate gpt-bak-std "$disk"
+
+definitions=/run/carbideos-repart.d
+rm -rf "$definitions"
+cp -a /usr/lib/carbideos/repart.d "$definitions"
+
+systemd-repart --definitions="$definitions" --dry-run=no "$disk"
+udevadm settle
+
+# GPT auto-discovery ran before a first-boot partition existed. Reboot once so
+# the newly created encrypted state and swap are discovered from the initrd.
+if [ "$had_state" = no ] && [ -e "$state" ]; then
+    systemctl --no-block reboot
+fi

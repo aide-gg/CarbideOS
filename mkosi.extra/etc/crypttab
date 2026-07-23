@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Each volume has an independently enrolled TPM2 LUKS key.
+state /dev/disk/by-partlabel/carbideos_state - tpm2-device=auto
+workload /dev/disk/by-partlabel/carbideos_workload - tpm2-device=auto

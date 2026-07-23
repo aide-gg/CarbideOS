@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=CarbideOS workload state
+After=systemd-cryptsetup@workload.service
+Requires=systemd-cryptsetup@workload.service
+Before=local-fs.target
+
+[Mount]
+What=/dev/mapper/workload
+Where=/var/lib/carbideos/workload
+Type=btrfs
+Options=noexec,nosuid,nodev,rootcontext=system_u:object_r:var_lib_t:s0
+
+[Install]
+WantedBy=local-fs.target

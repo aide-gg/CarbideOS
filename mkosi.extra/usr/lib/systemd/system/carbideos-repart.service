@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Expand CarbideOS onto the backing disk
+Documentation=man:systemd-repart(8)
+DefaultDependencies=no
+ConditionVirtualization=!container
+ConditionDirectoryNotEmpty=/usr/lib/carbideos/repart.d
+After=systemd-tpm2-setup-early.service
+Before=systemd-cryptsetup@state.service systemd-cryptsetup@workload.service
+Before=cryptsetup.target local-fs-pre.target
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/carbideos-repart
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=CarbideOS system state
+After=systemd-cryptsetup@state.service
+Requires=systemd-cryptsetup@state.service
+Before=local-fs.target
+
+[Mount]
+What=/dev/mapper/state
+Where=/var
+Type=btrfs
+Options=noexec,nosuid,nodev,rootcontext=system_u:object_r:var_t:s0
+
+[Install]
+WantedBy=local-fs.target

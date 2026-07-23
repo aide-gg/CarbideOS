@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+NAME="CarbideOS"
+VERSION="@IMAGE_VERSION@"
+ID=carbideos
+ID_LIKE=fedora
+VERSION_ID="@IMAGE_VERSION@"
+PRETTY_NAME="CarbideOS @IMAGE_VERSION@"
+ANSI_COLOR="0;38;2;53;201;169"
+LOGO=carbideos
+HOME_URL="https://aide.gg/"
+DOCUMENTATION_URL="https://github.com/aide-gg/CarbideOS"
+SUPPORT_URL="https://github.com/aide-gg/CarbideOS/issues"
+BUG_REPORT_URL="https://github.com/aide-gg/CarbideOS/issues"
+VENDOR_NAME="AIde"
+VENDOR_URL="https://aide.gg/"
+IMAGE_ID=carbideos
+IMAGE_VERSION="@IMAGE_VERSION@"

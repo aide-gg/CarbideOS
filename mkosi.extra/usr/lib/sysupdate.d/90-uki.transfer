@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Transfer]
+ProtectVersion=%A
+Verify=yes
+
+[Source]
+Type=url-file
+Path=https://updates.aide.gg/carbideos
+MatchPattern=carbideos_@v.efi
+
+[Target]
+Type=regular-file
+Path=/EFI/Linux
+PathRelativeTo=boot
+MatchPattern=carbideos_@v+@l-@d.efi \
+             carbideos_@v+@l.efi \
+             carbideos_@v.efi
+Mode=0600
+TriesLeft=3
+TriesDone=0
+InstancesMax=2
