@@ -138,7 +138,8 @@ set -- "$update_feed"/"${update_prefix}_${version}_"*.verity.raw.zst
 verity_artifact=$1
 verity_sig_artifact="$update_feed/${update_prefix}_${version}.verity-sig.raw.zst"
 uki_artifact="$update_feed/${update_prefix}_${version}.efi"
-extension_artifact="$update_feed/rat-game-16_277d18d-3.sysext.raw"
+extension_artifact="$update_feed/rat-game-16_277d18d-3_\
+${version}.sysext.raw"
 if [ ! -s "$extension_artifact" ]; then
     printf '%s\n' 'Missing Rat Game system extension artifact.' >&2
     exit 1

@@ -120,7 +120,8 @@ if [ "$current" -gt "$limit" ]; then
     exit 1
 fi
 
-find "$source" -type f -printf '%P\t%s\n' | LC_ALL=C sort >"$local_files"
+find "$source" -maxdepth 1 -type f -printf '%P\t%s\n' | \
+    LC_ALL=C sort >"$local_files"
 if [ ! -s "$local_files" ]; then
     printf 'Update directory is empty: %s\n' "$source" >&2
     exit 1
