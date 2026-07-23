@@ -1,0 +1,50 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+real_rm=/usr/libexec/carbideos-rm.real
+
+recursive=0
+options=1
+for argument do
+    if [ "$options" -eq 1 ]; then
+        case "$argument" in
+            --)
+                options=0
+                continue
+                ;;
+            --recursive|-*r*|-*R*)
+                recursive=1
+                ;;
+        esac
+    fi
+done
+
+[ "$recursive" -eq 1 ] || exec "$real_rm" "$@"
+
+options=1
+for argument do
+    if [ "$options" -eq 1 ]; then
+        case "$argument" in
+            --)
+                options=0
+                continue
+                ;;
+            -*)
+                continue
+                ;;
+        esac
+    fi
+
+    resolved=$(realpath -m -- "$argument")
+    for protected in / /boot /efi /etc /usr; do
+        if [ "$resolved" = "$protected" ] ||
+            { [ "$protected" != / ] && [ "${resolved#"$protected"/}" != "$resolved" ]; }; then
+            printf 'carbideos-rm: refusing recursive deletion of protected path: %s\n' \
+                "$resolved" >&2
+            exit 1
+        fi
+    done
+done
+
+exec "$real_rm" "$@"

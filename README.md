@@ -88,6 +88,11 @@ CarbideOS accepts only signed, dm-verity-protected extension DDIs. Install the
 allowlisted Rat Game extension with `sudo carbideos-extension install
 rat-game-16` and remove it with `sudo carbideos-extension remove rat-game-16`.
 
+Recursive `rm` operations are preflighted by an immutable guard. Deletion is
+refused before any operand is processed if a target resolves inside `/`,
+`/boot`, `/efi`, `/etc`, or `/usr`; this also catches `rm -rf /*`. The guard
+has no supported override.
+
 ## Base OS Updates
 
 First boot creates fixed-capacity `_empty` root, verity, and signature slots.

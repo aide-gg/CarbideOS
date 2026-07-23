@@ -12,7 +12,7 @@ output="$PWD/dist/extensions/rat-game-16"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-for command in g++ git strip systemd-repart tar unshare; do
+for command in g++ git mkfs.erofs strip systemd-repart tar; do
     if ! command -v "$command" >/dev/null 2>&1; then
         printf 'Missing required command: %s\n' "$command" >&2
         exit 1
@@ -63,12 +63,41 @@ EOF
 
 find "$root" -exec touch -h -d "@$epoch" {} +
 rm -f "$output/rat-game-16.raw" "$output/rat-game-16.elf"
-unshare --user --map-root-user \
-    systemd-repart --make-ddi=sysext \
+mkfs.erofs --quiet --all-root --all-time -T "$epoch" \
+    -L rat-game-16 -zlz4hc,level=12 \
+    --file-contexts=extensions/rat-game-16/file-contexts \
+    "$work/root.erofs" "$root"
+
+definitions="$work/repart.d"
+install -d "$definitions"
+cat >"$definitions/10-root.conf" <<EOF
+[Partition]
+Type=root
+CopyBlocks=$work/root.erofs
+Verity=data
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/20-root-verity.conf" <<EOF
+[Partition]
+Type=root-verity
+Verity=hash
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/30-root-verity-sig.conf" <<EOF
+[Partition]
+Type=root-verity-sig
+Verity=signature
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+systemd-repart --empty=create --size=16M \
     --seed=277d18d3-dc6e-9996-92f6-2352e67d5aa8 \
+    --definitions="$definitions" \
     --private-key=keys/secureboot/secure-boot.key \
     --certificate=keys/secureboot/secure-boot.crt \
-    --copy-source="$root" "$output/rat-game-16.raw"
+    "$output/rat-game-16.raw"
 install -m 0755 "$root/usr/libexec/rat-game-16" \
     "$output/rat-game-16.elf"
 cat >"$output/PROVENANCE" <<EOF

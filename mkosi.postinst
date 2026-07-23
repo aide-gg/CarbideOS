@@ -19,6 +19,10 @@ semodule_package -o /tmp/carbideos_boot.pp -m /tmp/carbideos_boot.mod
 semodule -i /tmp/carbideos_boot.pp
 rm -f /tmp/carbideos_boot.mod /tmp/carbideos_boot.pp
 
+# Keep the guard and the original coreutils implementation in immutable /usr.
+mv /usr/bin/rm /usr/libexec/carbideos-rm.real
+ln -s ../libexec/carbideos-rm /usr/bin/rm
+
 if [ "${CARBIDEOS_DEBUG:-0}" = 1 ]; then
     password=$(cat /usr/lib/carbideos/ace-mgmt.password)
     printf 'root:%s\n' "$password" | chpasswd

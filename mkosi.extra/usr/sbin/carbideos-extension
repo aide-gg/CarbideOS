@@ -9,7 +9,7 @@ action=$1
 name=$2
 case "$name" in
     rat-game-16)
-        artifact=rat-game-16_277d18d.sysext.raw
+        artifact=rat-game-16_277d18d-2.sysext.raw
         ;;
     *)
         printf 'Unknown extension: %s\n' "$name" >&2

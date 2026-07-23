@@ -42,8 +42,9 @@ if [ ! -s "$extension" ]; then
     printf '%s\n' 'Missing Rat Game system extension; run make extensions.' >&2
     exit 1
 fi
+rm -f "$update_feed"/rat-game-16_*.sysext.raw
 cp --preserve=mode,timestamps "$extension" \
-    "$update_feed/rat-game-16_277d18d.sysext.raw"
+    "$update_feed/rat-game-16_277d18d-2.sysext.raw"
 
 raw=$(mktemp --suffix=.raw)
 verity_sig_raw=$(mktemp --suffix=.verity-sig.raw)
