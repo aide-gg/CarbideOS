@@ -3,10 +3,24 @@
 set -eu
 
 cd "$(dirname "$0")/.."
+variant=development
+case "${1-}" in
+    '') ;;
+    --fleet) variant=fleet ;;
+    *) printf 'Usage: %s [--fleet]\n' "$0" >&2; exit 2 ;;
+esac
 version=$(tr -d '[:space:]' <mkosi.version)
-release="$PWD/dist/carbideos-${version}"
-update_feed="$PWD/dist/update-feed"
-gnupg="$PWD/keys/manifest/gnupg"
+if [ "$variant" = fleet ]; then
+    release="$PWD/dist/fleet/carbideos-${version}"
+    update_feed="$PWD/dist/update-feed/fleet"
+    gnupg="$PWD/keys/production/manifest/gnupg"
+    signer='CarbideOS Production Release'
+else
+    release="$PWD/dist/carbideos-${version}"
+    update_feed="$PWD/dist/update-feed"
+    gnupg="$PWD/keys/manifest/gnupg"
+    signer='CarbideOS Development Release'
+fi
 
 if [ ! -d "$release" ]; then
     printf '%s\n' 'No packaged release found; run make package first.' >&2
@@ -24,19 +38,36 @@ fi
         | xargs -r sha256sum >SHA256SUMS
 )
 
-GNUPGHOME="$gnupg" gpg --batch --yes --armor --detach-sign \
-    --local-user 'CarbideOS Development Release' \
-    --output "$release/SHA256SUMS.asc" "$release/SHA256SUMS"
-
 (
     cd "$update_feed"
     find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' -printf '%P\n' \
         | LC_ALL=C sort \
         | xargs -r sha256sum >SHA256SUMS
 )
-GNUPGHOME="$gnupg" gpg --batch --yes --detach-sign \
-    --local-user 'CarbideOS Development Release' \
-    --output "$update_feed/SHA256SUMS.gpg" "$update_feed/SHA256SUMS"
+if [ "$variant" = fleet ]; then
+    passphrase=${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}
+    if [ -z "$passphrase" ]; then
+        passphrase=$(systemd-ask-password \
+            'CarbideOS production signing passphrase:')
+    fi
+    printf '%s\n' "$passphrase" | GNUPGHOME="$gnupg" \
+        gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --armor --detach-sign --local-user "$signer" \
+            --output "$release/SHA256SUMS.asc" "$release/SHA256SUMS"
+    printf '%s\n' "$passphrase" | GNUPGHOME="$gnupg" \
+        gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --detach-sign --local-user "$signer" \
+            --output "$update_feed/SHA256SUMS.gpg" \
+            "$update_feed/SHA256SUMS"
+    unset passphrase
+else
+    GNUPGHOME="$gnupg" gpg --batch --yes --armor --detach-sign \
+        --local-user "$signer" \
+        --output "$release/SHA256SUMS.asc" "$release/SHA256SUMS"
+    GNUPGHOME="$gnupg" gpg --batch --yes --detach-sign \
+        --local-user "$signer" \
+        --output "$update_feed/SHA256SUMS.gpg" "$update_feed/SHA256SUMS"
+fi
 
 printf 'Signed release manifest: %s/SHA256SUMS.asc\n' "$release"
 printf 'Signed sysupdate manifest: %s/SHA256SUMS.gpg\n' "$update_feed"

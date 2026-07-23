@@ -2,13 +2,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -eu
 
-password=$(cat /usr/lib/carbideos/ace-mgmt.password)
+password_file=/var/lib/carbideos/ace-mgmt.password
+if [ -s /usr/lib/carbideos/ace-mgmt.password ]; then
+    password=$(cat /usr/lib/carbideos/ace-mgmt.password)
+elif [ -s "$password_file" ]; then
+    password=$(cat "$password_file")
+else
+    install -d -m 0700 /var/lib/carbideos
+    password=$(head -c 48 /dev/urandom | base64)
+    printf '%s\n' "$password" >"$password_file"
+    chmod 0600 "$password_file"
+fi
+
+admin_group=$(cat /usr/lib/carbideos/admin-group)
 if ! homectl inspect ace-mgmt >/dev/null 2>&1; then
     key=$(cat /usr/lib/carbideos/authorized_keys/ace-mgmt)
     NEWPASSWORD=$password homectl create ace-mgmt \
         --storage=subvolume \
         --shell=/bin/bash \
-        --member-of=wheel \
+        --member-of="$admin_group" \
         --password-change-now=no \
         --ssh-authorized-keys="$key" \
         -P

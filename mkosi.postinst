@@ -7,6 +7,30 @@ if [ "${container:-}" != mkosi ]; then
 fi
 
 sed -i "s/@IMAGE_VERSION@/$IMAGE_VERSION/g" /usr/lib/os-release
+variant=${CARBIDEOS_VARIANT:-development}
+case "$variant" in
+    fleet)
+        sed -i \
+            -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"CarbideOS $IMAGE_VERSION (Fleet)\"/" \
+            -e 's/^IMAGE_ID=.*/IMAGE_ID=carbideos-fleet/' \
+            /usr/lib/os-release
+        printf '%s\n' 'VARIANT="Fleet"' 'VARIANT_ID=fleet' \
+            >>/usr/lib/os-release
+        ;;
+    debug)
+        sed -i \
+            -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"CarbideOS $IMAGE_VERSION (Debug)\"/" \
+            -e 's/^IMAGE_ID=.*/IMAGE_ID=carbideos-debug/' \
+            /usr/lib/os-release
+        printf '%s\n' 'VARIANT="Debug"' 'VARIANT_ID=debug' \
+            >>/usr/lib/os-release
+        ;;
+    development) ;;
+    *)
+        printf 'Unknown CarbideOS build variant: %s\n' "$variant" >&2
+        exit 1
+        ;;
+esac
 base64 -d /usr/share/carbideos/import-pubring.pgp.b64 \
     >/usr/lib/systemd/import-pubring.pgp
 
@@ -22,16 +46,12 @@ rm -f /tmp/carbideos_boot.mod /tmp/carbideos_boot.pp
 # Keep the guard and the original coreutils implementation in immutable /usr.
 mv /usr/bin/rm /usr/libexec/carbideos-rm.real
 ln -s ../libexec/carbideos-rm /usr/bin/rm
+chmod 0440 /etc/sudoers.d/50-carbideos-operator
 
-if [ "${CARBIDEOS_DEBUG:-0}" = 1 ]; then
+if [ "$variant" = debug ]; then
     password=$(cat /usr/lib/carbideos/ace-mgmt.password)
     printf 'root:%s\n' "$password" | chpasswd
     unset password
-    sed -i \
-        -e "s/^PRETTY_NAME=.*/PRETTY_NAME=\"CarbideOS $IMAGE_VERSION (Debug)\"/" \
-        -e 's/^IMAGE_ID=.*/IMAGE_ID=carbideos-debug/' \
-        /usr/lib/os-release
-    printf '%s\n' 'VARIANT="Debug"' 'VARIANT_ID=debug' >>/usr/lib/os-release
 else
     passwd --lock root
 fi
@@ -40,7 +60,7 @@ authselect enable-feature with-systemd-homed
 
 systemctl enable sshd.service systemd-homed.service systemd-networkd.service \
     systemd-resolved.service systemd-userdbd.socket \
-    systemd-sysext.service \
+    systemd-sysext.service qemu-guest-agent.service \
     carbideos-home-init.service carbideos-homed-activate.service \
     carbideos-repart.service \
     carbideos-sshd-keygen.service carbideos-var-init.service home.mount \

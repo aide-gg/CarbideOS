@@ -3,9 +3,28 @@
 set -eu
 
 cd "$(dirname "$0")/.."
+variant=development
+case "${1-}" in
+    '') ;;
+    --fleet) variant=fleet ;;
+    *) printf 'Usage: %s [--fleet]\n' "$0" >&2; exit 2 ;;
+esac
 version=$(tr -d '[:space:]' <mkosi.version)
-release="$PWD/dist/carbideos-${version}"
-update_feed="$PWD/dist/update-feed"
+if [ "$variant" = fleet ]; then
+    release="$PWD/dist/fleet/carbideos-${version}"
+    update_feed="$PWD/dist/update-feed/fleet"
+    output=carbideos-fleet
+    secureboot_cert=keys/production/secureboot/secureboot.crt
+    trusted_release_pub=keys/production/manifest/release-signing.pub.asc
+    update_prefix=carbideos-fleet
+else
+    release="$PWD/dist/carbideos-${version}"
+    update_feed="$PWD/dist/update-feed"
+    output=carbideos
+    secureboot_cert=keys/secureboot/secure-boot.crt
+    trusted_release_pub=keys/manifest/release-signing.pub.asc
+    update_prefix=carbideos
+fi
 verify_home=$(mktemp -d)
 trap 'rm -rf "$verify_home"' EXIT HUP INT TERM
 
@@ -14,8 +33,14 @@ if [ -e mkosi.extra/usr/lib/carbideos/authorized_keys/ace-mgmt ]; then
     exit 1
 fi
 if [ "$(stat -c '%a' keys/admin/ace-mgmt.pub)" -gt 644 ] || \
-   [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; then
+   { [ "$variant" != fleet ] && \
+     [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; }; then
     printf '%s\n' 'Local admin credential inputs have unsafe modes.' >&2
+    exit 1
+fi
+
+if ! cmp -s "$trusted_release_pub" "$release/release-signing.pub.asc"; then
+    printf '%s\n' 'Packaged release key does not match configured trust.' >&2
     exit 1
 fi
 if grep -Eq '^(PasswordAuthentication yes|AllowUsers .*ace-bootstrap)' \
@@ -48,16 +73,20 @@ GNUPGHOME="$verify_home" gpg --batch --verify \
     sha256sum --check --strict SHA256SUMS
 )
 if ! grep -q '"name": "systemd-container"' \
-    "$release/carbideos.manifest"; then
+    "$release/$output.manifest"; then
     printf '%s\n' 'Release is missing systemd-pull (Fedora systemd-container).' >&2
     exit 1
 fi
-if ! grep -q '"name": "gnupg2"' "$release/carbideos.manifest"; then
+if ! grep -q '"name": "gnupg2"' "$release/$output.manifest"; then
     printf '%s\n' 'Release is missing gpg for signed update verification.' >&2
     exit 1
 fi
-if ! grep -q '"name": "systemd-pam"' "$release/carbideos.manifest"; then
+if ! grep -q '"name": "systemd-pam"' "$release/$output.manifest"; then
     printf '%s\n' 'Release is missing PAM integration for systemd-homed.' >&2
+    exit 1
+fi
+if ! grep -q '"name": "qemu-guest-agent"' "$release/$output.manifest"; then
+    printf '%s\n' 'Release is missing QEMU Guest Agent.' >&2
     exit 1
 fi
 (
@@ -74,10 +103,10 @@ for command in jq sbverify sfdisk systemd-dissect zstd; do
 done
 
 for pattern in \
-    "carbideos_${version}.efi" \
-    "carbideos_${version}_"'*.root.raw.zst' \
-    "carbideos_${version}_"'*.verity.raw.zst' \
-    "carbideos_${version}.verity-sig.raw.zst"; do
+    "${update_prefix}_${version}.efi" \
+    "${update_prefix}_${version}_"'*.root.raw.zst' \
+    "${update_prefix}_${version}_"'*.verity.raw.zst' \
+    "${update_prefix}_${version}.verity-sig.raw.zst"; do
     # The patterns intentionally expand to exactly one update artifact.
     # shellcheck disable=SC2086
     set -- "$update_feed"/$pattern
@@ -87,12 +116,12 @@ for pattern in \
     fi
 done
 
-set -- "$update_feed"/"carbideos_${version}_"*.root.raw.zst
+set -- "$update_feed"/"${update_prefix}_${version}_"*.root.raw.zst
 root_artifact=$1
-set -- "$update_feed"/"carbideos_${version}_"*.verity.raw.zst
+set -- "$update_feed"/"${update_prefix}_${version}_"*.verity.raw.zst
 verity_artifact=$1
-verity_sig_artifact="$update_feed/carbideos_${version}.verity-sig.raw.zst"
-uki_artifact="$update_feed/carbideos_${version}.efi"
+verity_sig_artifact="$update_feed/${update_prefix}_${version}.verity-sig.raw.zst"
+uki_artifact="$update_feed/${update_prefix}_${version}.efi"
 extension_artifact="$update_feed/rat-game-16_277d18d-3.sysext.raw"
 if [ ! -s "$extension_artifact" ]; then
     printf '%s\n' 'Missing Rat Game system extension artifact.' >&2
@@ -102,13 +131,18 @@ if ! sudo systemd-dissect "$extension_artifact" | grep -q 'signed'; then
     printf '%s\n' 'System extension is not verity signed.' >&2
     exit 1
 fi
-if ! sbverify --cert keys/secureboot/secure-boot.crt "$uki_artifact" \
+if ! sbverify --cert "$secureboot_cert" "$uki_artifact" \
     >/dev/null; then
     printf '%s\n' 'UKI is not signed by the configured Secure Boot key.' >&2
     exit 1
 fi
+if [ "$variant" = fleet ] && \
+   ! openssl verify -CAfile "$secureboot_cert" "$release/sysext.crt"; then
+    printf '%s\n' 'Fleet sysext certificate is not authorized by Secure Boot trust.' >&2
+    exit 1
+fi
 
-image="$release/carbideos.raw.zst"
+image="$release/$output.raw.zst"
 raw=$(mktemp --suffix=.raw)
 trap 'rm -rf "$verify_home" "$raw"' EXIT HUP INT TERM
 zstd --long=31 --decompress --stdout "$image" >"$raw"
@@ -119,12 +153,12 @@ sfdisk=${SFDISK:-$(command -v sfdisk || true)}
 root_uuid=$("$sfdisk" --part-uuid "$raw" 2 | tr '[:upper:]' '[:lower:]')
 verity_uuid=$("$sfdisk" --part-uuid "$raw" 3 | tr '[:upper:]' '[:lower:]')
 if [ "$(basename "$root_artifact")" != \
-    "carbideos_${version}_${root_uuid}.root.raw.zst" ]; then
+    "${update_prefix}_${version}_${root_uuid}.root.raw.zst" ]; then
     printf '%s\n' 'Root artifact filename does not contain its GPT UUID.' >&2
     exit 1
 fi
 if [ "$(basename "$verity_artifact")" != \
-    "carbideos_${version}_${verity_uuid}.verity.raw.zst" ]; then
+    "${update_prefix}_${version}_${verity_uuid}.verity.raw.zst" ]; then
     printf '%s\n' 'Verity artifact filename does not contain its GPT UUID.' >&2
     exit 1
 fi
@@ -148,12 +182,21 @@ if [ $((uki_size * 2 + 16 * 1024 * 1024)) -gt "$esp_size" ]; then
 fi
 
 if [ "$(id -u)" -eq 0 ]; then
-    systemd-dissect "$raw"
+    dissection=$(systemd-dissect "$raw")
 elif command -v sudo >/dev/null 2>&1; then
-    sudo systemd-dissect "$raw"
+    dissection=$(sudo systemd-dissect "$raw")
 else
     printf '%s\n' 'sudo is required for partition metadata inspection.' >&2
     exit 1
+fi
+printf '%s\n' "$dissection"
+if [ "$variant" = fleet ]; then
+    if ! printf '%s\n' "$dissection" | \
+        grep -q 'IMAGE_ID=carbideos-fleet' || \
+       ! printf '%s\n' "$dissection" | grep -q 'VARIANT_ID=fleet'; then
+        printf '%s\n' 'Fleet image identity is missing or incorrect.' >&2
+        exit 1
+    fi
 fi
 
 printf 'Verified CarbideOS %s release.\n' "$version"

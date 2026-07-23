@@ -1,0 +1,118 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+umask 077
+
+destination=keys/production
+if [ -e "$destination" ]; then
+    printf '%s\n' "$destination already exists; refusing to overwrite production trust." >&2
+    exit 1
+fi
+
+for command in gpg openssl systemd-ask-password; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+passphrase=$(systemd-ask-password \
+    'New CarbideOS production signing passphrase:')
+confirmation=$(systemd-ask-password \
+    'Confirm CarbideOS production signing passphrase:')
+if [ -z "$passphrase" ] || [ "$passphrase" != "$confirmation" ]; then
+    printf '%s\n' 'Passphrases are empty or do not match.' >&2
+    exit 1
+fi
+unset confirmation
+export CARBIDEOS_KEY_PASSPHRASE="$passphrase"
+
+cleanup() {
+    unset CARBIDEOS_KEY_PASSPHRASE passphrase
+    if [ "${complete:-no}" != yes ]; then
+        rm -rf "$destination"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p \
+    "$destination/secureboot" \
+    "$destination/verity" \
+    "$destination/sysext" \
+    "$destination/manifest/gnupg"
+
+make_certificate() {
+    name=$1
+    common_name=$2
+    openssl req -new -x509 -newkey rsa:4096 -sha256 -days 3650 \
+        -subj "/CN=$common_name/" \
+        -passout env:CARBIDEOS_KEY_PASSPHRASE \
+        -keyout "$destination/$name/$name.key" \
+        -out "$destination/$name/$name.crt"
+}
+
+make_certificate secureboot 'CarbideOS Production Secure Boot'
+make_certificate verity 'CarbideOS Production Base Verity'
+openssl req -new -newkey rsa:4096 -sha256 \
+    -subj '/CN=CarbideOS Production System Extension Verity/' \
+    -passout env:CARBIDEOS_KEY_PASSPHRASE \
+    -keyout "$destination/sysext/sysext.key" \
+    -out "$destination/sysext/sysext.csr"
+cat >"$destination/sysext/sysext.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=codeSigning
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+openssl x509 -req -sha256 -days 3650 \
+    -in "$destination/sysext/sysext.csr" \
+    -CA "$destination/secureboot/secureboot.crt" \
+    -CAkey "$destination/secureboot/secureboot.key" \
+    -passin env:CARBIDEOS_KEY_PASSPHRASE -CAcreateserial \
+    -extfile "$destination/sysext/sysext.ext" \
+    -out "$destination/sysext/sysext.crt"
+rm -f \
+    "$destination/sysext/sysext.csr" \
+    "$destination/sysext/sysext.ext" \
+    "$destination/secureboot/secureboot.srl"
+
+printf '%s\n' "$passphrase" | \
+    GNUPGHOME="$PWD/$destination/manifest/gnupg" \
+    gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
+        --quick-generate-key \
+        'CarbideOS Production Release <release@carbideos.aide.gg>' \
+        ed25519 sign 3y
+GNUPGHOME="$PWD/$destination/manifest/gnupg" gpg --batch --armor --export \
+    'CarbideOS Production Release' \
+    >"$destination/manifest/release-signing.pub.asc"
+
+{
+    for name in secureboot verity sysext; do
+        printf '%s SHA256 ' "$name"
+        openssl x509 -in "$destination/$name/$name.crt" \
+            -noout -fingerprint -sha256 | cut -d= -f2
+    done
+    GNUPGHOME="$PWD/$destination/manifest/gnupg" \
+        gpg --batch --with-colons --fingerprint \
+            'CarbideOS Production Release' | \
+        awk -F: '$1 == "fpr" { print "manifest OpenPGP " $10; exit }'
+} >"$destination/FINGERPRINTS"
+
+chmod 0600 "$destination"/*/*.key
+chmod 0700 "$destination/manifest/gnupg"
+chmod 0644 \
+    "$destination"/*/*.crt \
+    "$destination/manifest/release-signing.pub.asc" \
+    "$destination/FINGERPRINTS"
+
+complete=yes
+unset CARBIDEOS_KEY_PASSPHRASE passphrase
+trap - EXIT HUP INT TERM
+
+printf '%s\n' 'Production signing identities created:'
+cat "$destination/FINGERPRINTS"
+printf '\n%s\n' \
+    'Back up keys/production offline before using these identities for a release.'

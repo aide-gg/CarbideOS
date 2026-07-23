@@ -32,6 +32,7 @@ fi
 
 source=$(realpath "$1")
 prefix=${CARBIDEOS_R2_PREFIX:-carbideos}
+gnupg=${CARBIDEOS_RELEASE_GNUPGHOME:-$PWD/keys/manifest/gnupg}
 prefix=${prefix#/}
 prefix=${prefix%/}
 export AWS_DEFAULT_REGION=auto
@@ -61,7 +62,7 @@ if [ ! -f "$source/SHA256SUMS" ] || [ ! -f "$source/SHA256SUMS.gpg" ]; then
     exit 1
 fi
 
-GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --verify \
+GNUPGHOME="$gnupg" gpg --batch --verify \
     "$source/SHA256SUMS.gpg" "$source/SHA256SUMS"
 (
     cd "$source"
@@ -82,7 +83,7 @@ if aws_r2 s3 cp "s3://$CARBIDEOS_R2_BUCKET/$manifest_key" \
        "$remote_sums" --no-progress --only-show-errors 2>/dev/null && \
    aws_r2 s3 cp "s3://$CARBIDEOS_R2_BUCKET/$signature_key" \
        "$remote_signature" --no-progress --only-show-errors 2>/dev/null && \
-   GNUPGHOME="$PWD/keys/manifest/gnupg" gpg --batch --verify \
+   GNUPGHOME="$gnupg" gpg --batch --verify \
        "$remote_signature" "$remote_sums" >/dev/null 2>&1; then
     remote_manifest_valid=1
 fi
@@ -104,9 +105,11 @@ replaced_total=0
 tab=$(printf '\t')
 while IFS="$tab" read -r relative size; do
     case "$relative" in
-        SHA256SUMS|SHA256SUMS.gpg|carbideos_*.efi|\
-        carbideos_*.root.raw.zst|carbideos_*.verity.raw.zst|\
-        carbideos_*.verity-sig.raw.zst|rat-game-16_*.sysext.raw)
+        SHA256SUMS|SHA256SUMS.gpg|carbideos_*.efi|carbideos-fleet_*.efi|\
+        carbideos_*.root.raw.zst|carbideos-fleet_*.root.raw.zst|\
+        carbideos_*.verity.raw.zst|carbideos-fleet_*.verity.raw.zst|\
+        carbideos_*.verity-sig.raw.zst|\
+        carbideos-fleet_*.verity-sig.raw.zst|rat-game-16_*.sysext.raw)
             ;;
         *)
             printf 'Refusing unexpected update-feed file: %s\n' \

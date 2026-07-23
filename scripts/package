@@ -3,9 +3,34 @@
 set -eu
 
 cd "$(dirname "$0")/.."
+variant=development
+case "${1-}" in
+    '') ;;
+    --fleet) variant=fleet ;;
+    *) printf 'Usage: %s [--fleet]\n' "$0" >&2; exit 2 ;;
+esac
 version=$(tr -d '[:space:]' <mkosi.version)
-release="dist/carbideos-${version}"
-update_feed="dist/update-feed"
+if [ "$variant" = fleet ]; then
+    output=carbideos-fleet
+    release="dist/fleet/carbideos-${version}"
+    update_feed="dist/update-feed/fleet"
+    release_pub=keys/production/manifest/release-signing.pub.asc
+    secureboot_cert=keys/production/secureboot/secureboot.crt
+    verity_cert=keys/production/verity/verity.crt
+    sysext_cert=keys/production/sysext/sysext.crt
+    extension=dist/extensions/fleet/rat-game-16/rat-game-16.raw
+    update_prefix=carbideos-fleet
+else
+    output=carbideos
+    release="dist/carbideos-${version}"
+    update_feed="dist/update-feed"
+    release_pub=keys/manifest/release-signing.pub.asc
+    secureboot_cert=keys/secureboot/secure-boot.crt
+    verity_cert=keys/verity/verity.crt
+    sysext_cert=keys/secureboot/secure-boot.crt
+    extension=dist/extensions/rat-game-16/rat-game-16.raw
+    update_prefix=carbideos
+fi
 
 if [ ! -d mkosi.output ]; then
     printf '%s\n' 'No mkosi output found; run make build first.' >&2
@@ -15,29 +40,33 @@ fi
 rm -rf "$release"
 mkdir -p "$release"
 mkdir -p "$update_feed"
+if [ "$variant" = fleet ]; then
+    find "$update_feed" -maxdepth 1 -type f -name 'carbideos_*' -delete
+fi
 find "$update_feed" -maxdepth 1 -type f \
-    \( -name "carbideos_${version}.*" -o -name "carbideos_${version}_*" \
+    \( -name "${update_prefix}_${version}.*" \
+       -o -name "${update_prefix}_${version}_*" \
        -o -name 'SHA256SUMS' -o -name 'SHA256SUMS.gpg' \) -delete
 
 for artifact in \
-    mkosi.output/carbideos.raw.zst \
-    mkosi.output/carbideos.efi \
-    mkosi.output/carbideos.esp.raw.zst \
-    mkosi.output/carbideos.root-x86-64.raw.zst \
-    mkosi.output/carbideos.root-x86-64-verity.raw.zst \
-    mkosi.output/carbideos.root-x86-64-verity-sig.raw.zst \
-    mkosi.output/carbideos.manifest; do
+    "mkosi.output/$output.raw.zst" \
+    "mkosi.output/$output.efi" \
+    "mkosi.output/$output.esp.raw.zst" \
+    "mkosi.output/$output.root-x86-64.raw.zst" \
+    "mkosi.output/$output.root-x86-64-verity.raw.zst" \
+    "mkosi.output/$output.root-x86-64-verity-sig.raw.zst" \
+    "mkosi.output/$output.manifest"; do
     if [ ! -s "$artifact" ]; then
         printf 'Missing required artifact: %s\n' "$artifact" >&2
         exit 1
     fi
     cp --preserve=mode,timestamps "$artifact" "$release/"
 done
-cp keys/manifest/release-signing.pub.asc "$release/"
-cp keys/secureboot/secure-boot.crt "$release/secure-boot.crt"
-cp keys/verity/verity.crt "$release/verity.crt"
+cp "$release_pub" "$release/release-signing.pub.asc"
+cp "$secureboot_cert" "$release/secure-boot.crt"
+cp "$verity_cert" "$release/verity.crt"
+cp "$sysext_cert" "$release/sysext.crt"
 
-extension=dist/extensions/rat-game-16/rat-game-16.raw
 if [ ! -s "$extension" ]; then
     printf '%s\n' 'Missing Rat Game system extension; run make extensions.' >&2
     exit 1
@@ -49,7 +78,7 @@ cp --preserve=mode,timestamps "$extension" \
 raw=$(mktemp --suffix=.raw)
 verity_sig_raw=$(mktemp --suffix=.verity-sig.raw)
 trap 'rm -f "$raw" "$verity_sig_raw"' EXIT HUP INT TERM
-zstd --long=31 --decompress --stdout mkosi.output/carbideos.raw.zst >"$raw"
+zstd --long=31 --decompress --stdout "mkosi.output/$output.raw.zst" >"$raw"
 sfdisk=${SFDISK:-$(command -v sfdisk || true)}
 [ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk
 if [ ! -x "$sfdisk" ]; then
@@ -59,22 +88,22 @@ fi
 root_uuid=$("$sfdisk" --part-uuid "$raw" 2 | tr '[:upper:]' '[:lower:]')
 verity_uuid=$("$sfdisk" --part-uuid "$raw" 3 | tr '[:upper:]' '[:lower:]')
 
-cp --preserve=mode,timestamps mkosi.output/carbideos.efi \
-    "$update_feed/carbideos_${version}.efi"
+cp --preserve=mode,timestamps "mkosi.output/$output.efi" \
+    "$update_feed/${update_prefix}_${version}.efi"
 zstd --long=31 --decompress --stdout \
-    mkosi.output/carbideos.root-x86-64.raw.zst \
+    "mkosi.output/$output.root-x86-64.raw.zst" \
     | zstd --compress --quiet --force \
-        -o "$update_feed/carbideos_${version}_${root_uuid}.root.raw.zst"
+        -o "$update_feed/${update_prefix}_${version}_${root_uuid}.root.raw.zst"
 zstd --long=31 --decompress --stdout \
-    mkosi.output/carbideos.root-x86-64-verity.raw.zst \
+    "mkosi.output/$output.root-x86-64-verity.raw.zst" \
     | zstd --compress --quiet --force \
-        -o "$update_feed/carbideos_${version}_${verity_uuid}.verity.raw.zst"
+        -o "$update_feed/${update_prefix}_${version}_${verity_uuid}.verity.raw.zst"
 zstd --long=31 --decompress --stdout \
-    mkosi.output/carbideos.root-x86-64-verity-sig.raw.zst \
+    "mkosi.output/$output.root-x86-64-verity-sig.raw.zst" \
     >"$verity_sig_raw"
 truncate -s 16K "$verity_sig_raw"
 zstd --compress --quiet --force "$verity_sig_raw" \
-    -o "$update_feed/carbideos_${version}.verity-sig.raw.zst"
+    -o "$update_feed/${update_prefix}_${version}.verity-sig.raw.zst"
 
 if ! find "$release" -maxdepth 1 -type f -name '*.raw.zst' | grep -q .; then
     printf '%s\n' 'Packaged release does not contain a compressed disk image.' >&2

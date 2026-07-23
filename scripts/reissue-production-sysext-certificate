@@ -1,0 +1,64 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+umask 077
+directory=keys/production
+
+for file in \
+    "$directory/secureboot/secureboot.key" \
+    "$directory/secureboot/secureboot.crt" \
+    "$directory/sysext/sysext.key"; do
+    [ -s "$file" ] || { printf 'Missing %s\n' "$file" >&2; exit 1; }
+done
+
+passphrase=$(systemd-ask-password \
+    'CarbideOS production signing passphrase:')
+export CARBIDEOS_KEY_PASSPHRASE="$passphrase"
+work=$(mktemp -d)
+cleanup() {
+    unset CARBIDEOS_KEY_PASSPHRASE passphrase
+    rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
+
+openssl req -new -sha256 \
+    -subj '/CN=CarbideOS Production System Extension Verity/' \
+    -key "$directory/sysext/sysext.key" \
+    -passin env:CARBIDEOS_KEY_PASSPHRASE \
+    -out "$work/sysext.csr"
+cat >"$work/sysext.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=codeSigning
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+EOF
+openssl x509 -req -sha256 -days 3650 \
+    -in "$work/sysext.csr" \
+    -CA "$directory/secureboot/secureboot.crt" \
+    -CAkey "$directory/secureboot/secureboot.key" \
+    -passin env:CARBIDEOS_KEY_PASSPHRASE -CAcreateserial \
+    -extfile "$work/sysext.ext" -out "$work/sysext.crt"
+openssl verify -CAfile "$directory/secureboot/secureboot.crt" \
+    "$work/sysext.crt"
+install -m 0644 "$work/sysext.crt" \
+    "$directory/sysext/sysext.crt"
+rm -f "$directory/secureboot/secureboot.srl"
+
+{
+    for name in secureboot verity sysext; do
+        printf '%s SHA256 ' "$name"
+        openssl x509 -in "$directory/$name/$name.crt" \
+            -noout -fingerprint -sha256 | cut -d= -f2
+    done
+    GNUPGHOME="$PWD/$directory/manifest/gnupg" \
+        gpg --batch --with-colons --fingerprint \
+            'CarbideOS Production Release' | \
+        awk -F: '$1 == "fpr" { print "manifest OpenPGP " $10; exit }'
+} >"$directory/FINGERPRINTS"
+chmod 0644 "$directory/FINGERPRINTS"
+
+printf '%s\n' 'Reissued sysext certificate under the production Secure Boot CA.'
+cat "$directory/FINGERPRINTS"

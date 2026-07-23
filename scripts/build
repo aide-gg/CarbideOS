@@ -4,43 +4,81 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-debug=no
+variant=development
 case "${1-}" in
     '') ;;
     --debug)
-        debug=yes
+        variant=debug
+        ;;
+    --fleet)
+        variant=fleet
         ;;
     *)
-        printf 'Usage: %s [--debug]\n' "$0" >&2
+        printf 'Usage: %s [--debug|--fleet]\n' "$0" >&2
         exit 2
         ;;
 esac
 if [ "$#" -gt 1 ]; then
-    printf 'Usage: %s [--debug]\n' "$0" >&2
+    printf 'Usage: %s [--debug|--fleet]\n' "$0" >&2
     exit 2
 fi
 
+case "$variant" in
+    fleet)
+        secureboot_key=keys/production/secureboot/secureboot.key
+        secureboot_cert=keys/production/secureboot/secureboot.crt
+        verity_key=keys/production/verity/verity.key
+        verity_cert=keys/production/verity/verity.crt
+        release_pub=keys/production/manifest/release-signing.pub.asc
+        admin_group=carbide-operator
+        output=carbideos-fleet
+        ;;
+    debug)
+        secureboot_key=keys/secureboot/secure-boot.key
+        secureboot_cert=keys/secureboot/secure-boot.crt
+        verity_key=keys/verity/verity.key
+        verity_cert=keys/verity/verity.crt
+        release_pub=keys/manifest/release-signing.pub.asc
+        admin_group=wheel
+        output=carbideos-debug
+        ;;
+    development)
+        secureboot_key=keys/secureboot/secure-boot.key
+        secureboot_cert=keys/secureboot/secure-boot.crt
+        verity_key=keys/verity/verity.key
+        verity_cert=keys/verity/verity.crt
+        release_pub=keys/manifest/release-signing.pub.asc
+        admin_group=wheel
+        output=carbideos
+        ;;
+esac
+
 for file in \
-    keys/secureboot/secure-boot.key \
-    keys/secureboot/secure-boot.crt \
-    keys/verity/verity.key \
-    keys/verity/verity.crt \
-    keys/manifest/release-signing.pub.asc \
-    keys/admin/ace-mgmt.pub \
-    keys/admin/ace-mgmt.password; do
+    "$secureboot_key" \
+    "$secureboot_cert" \
+    "$verity_key" \
+    "$verity_cert" \
+    "$release_pub" \
+    keys/admin/ace-mgmt.pub; do
     if [ ! -s "$file" ]; then
         printf 'Missing %s; run make keys first.\n' "$file" >&2
         exit 1
     fi
 done
 
-if [ "$(stat -c '%a' keys/secureboot/secure-boot.key)" -gt 600 ] || \
-   [ "$(stat -c '%a' keys/verity/verity.key)" -gt 600 ]; then
+if [ "$variant" != fleet ] && [ ! -s keys/admin/ace-mgmt.password ]; then
+    printf '%s\n' 'Missing keys/admin/ace-mgmt.password.' >&2
+    exit 1
+fi
+
+if [ "$(stat -c '%a' "$secureboot_key")" -gt 600 ] || \
+   [ "$(stat -c '%a' "$verity_key")" -gt 600 ]; then
     printf '%s\n' 'Private signing keys must not be group/world accessible.' >&2
     exit 1
 fi
 
-if [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; then
+if [ "$variant" != fleet ] && \
+   [ "$(stat -c '%a' keys/admin/ace-mgmt.password)" -gt 600 ]; then
     printf '%s\n' 'The admin password file must not be group/world accessible.' >&2
     exit 1
 fi
@@ -51,31 +89,82 @@ if [ "$(id -u)" -ne 0 ]; then
         exit 1
     fi
     printf '%s\n' 'Elevating mkosi so Fedora SELinux labels can be applied.'
+    if [ -n "${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}" ]; then
+        exec sudo --preserve-env=CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+            "$PWD/scripts/build" "$@"
+    fi
     exec sudo "$PWD/scripts/build" "$@"
 fi
 
 # Replace only CarbideOS artifacts. Keep mkosi.output/tools so the large Debian
 # tools environment is reused across image rebuilds.
-output=carbideos
-[ "$debug" = yes ] && output=carbideos-debug
 if [ -d mkosi.output ]; then
     find mkosi.output -maxdepth 1 \( -type f -o -type l \) \
         -name "$output.*" -delete
 fi
 
 extra=$(mktemp -d)
-trap 'rm -rf "$extra"' EXIT HUP INT TERM
+private_work=
+cleanup() {
+    rm -rf "$extra"
+    [ -z "$private_work" ] || rm -rf "$private_work"
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ "$variant" = fleet ]; then
+    passphrase=${CARBIDEOS_PRODUCTION_KEY_PASSPHRASE:-}
+    if [ -z "$passphrase" ]; then
+        passphrase=$(systemd-ask-password \
+            'CarbideOS production signing passphrase:')
+    fi
+    private_work=$(mktemp -d)
+    chmod 0700 "$private_work"
+    export CARBIDEOS_PRODUCTION_KEY_PASSPHRASE="$passphrase"
+    openssl pkey -in "$secureboot_key" \
+        -passin env:CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+        -out "$private_work/secureboot.key"
+    openssl pkey -in "$verity_key" \
+        -passin env:CARBIDEOS_PRODUCTION_KEY_PASSPHRASE \
+        -out "$private_work/verity.key"
+    chmod 0600 "$private_work"/*.key
+    secureboot_key="$private_work/secureboot.key"
+    verity_key="$private_work/verity.key"
+    unset CARBIDEOS_PRODUCTION_KEY_PASSPHRASE passphrase
+fi
 install -d -m 0755 "$extra/usr/lib/carbideos/authorized_keys"
 install -m 0644 keys/admin/ace-mgmt.pub \
     "$extra/usr/lib/carbideos/authorized_keys/ace-mgmt"
-install -m 0600 keys/admin/ace-mgmt.password \
-    "$extra/usr/lib/carbideos/ace-mgmt.password"
+printf '%s\n' "$admin_group" >"$extra/usr/lib/carbideos/admin-group"
+install -d -m 0755 "$extra/usr/share/carbideos"
+gpg --batch --dearmor <"$release_pub" | base64 -w 0 \
+    >"$extra/usr/share/carbideos/import-pubring.pgp.b64"
+printf '\n' >>"$extra/usr/share/carbideos/import-pubring.pgp.b64"
+if [ "$variant" != fleet ]; then
+    install -m 0600 keys/admin/ace-mgmt.password \
+        "$extra/usr/lib/carbideos/ace-mgmt.password"
+fi
+if [ "$variant" = fleet ]; then
+    install -d -m 0755 \
+        "$extra/usr/lib/sysupdate.d" \
+        "$extra/usr/sbin"
+    for transfer in mkosi.extra/usr/lib/sysupdate.d/*.transfer; do
+        destination="$extra/usr/lib/sysupdate.d/$(basename "$transfer")"
+        sed \
+            -e 's|https://updates.aide.gg/carbideos|https://updates.aide.gg/carbideos/fleet|g' \
+            -e 's/carbideos_/carbideos-fleet_/g' \
+            "$transfer" >"$destination"
+    done
+    sed 's|https://updates.aide.gg/carbideos/|https://updates.aide.gg/carbideos/fleet/|g' \
+        mkosi.extra/usr/sbin/carbideos-extension \
+        >"$extra/usr/sbin/carbideos-extension"
+    chmod 0755 "$extra/usr/sbin/carbideos-extension"
+fi
 
-if [ "$debug" = yes ]; then
+if [ "$variant" = debug ]; then
     printf '%s\n' 'Building CarbideOS debug image with root password enabled.'
     mkosi --extra-tree="$extra" \
         --output=carbideos-debug --hostname=carbideos-debug \
-        --environment=CARBIDEOS_DEBUG=1 build
+        --environment=CARBIDEOS_VARIANT=debug build
 
     debug_release=dist/debug
     install -d "$debug_release"
@@ -92,4 +181,17 @@ if [ "$debug" = yes ]; then
     exit 0
 fi
 
-mkosi --extra-tree="$extra" build
+if [ "$variant" = fleet ]; then
+    printf '%s\n' 'Building CarbideOS fleet image with production trust.'
+    mkosi --extra-tree="$extra" \
+        --output="$output" --image-id=carbideos-fleet --hostname=carbideos \
+        --unified-kernel-image-format=carbideos-fleet_%v \
+        --environment=CARBIDEOS_VARIANT=fleet \
+        --secure-boot-key="$secureboot_key" \
+        --secure-boot-certificate="$secureboot_cert" \
+        --verity-key="$verity_key" \
+        --verity-certificate="$verity_cert" build
+else
+    mkosi --extra-tree="$extra" \
+        --environment=CARBIDEOS_VARIANT=development build
+fi

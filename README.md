@@ -88,6 +88,21 @@ CarbideOS accepts only signed, dm-verity-protected extension DDIs. Install the
 allowlisted Rat Game extension with `sudo carbideos-extension install
 rat-game-16` and remove it with `sudo carbideos-extension remove rat-game-16`.
 
+Access and release variants are defined in `ACCESS-MODEL.md`. Development
+images use the development trust set. A fleet build is explicit and uses only
+the encrypted production keys:
+
+```bash
+make fleet-pipeline
+```
+
+The fleet pipeline requests the production signing passphrase once through
+`systemd-ask-password` and clears it from its environment when complete.
+
+Fleet artifacts are staged under `dist/fleet/` and
+`dist/update-feed/fleet/`. Publishing requires the separate `publish-fleet`
+target and writes only to the `carbideos/fleet` R2 prefix.
+
 Recursive `rm` operations are preflighted by an immutable guard. Deletion is
 refused before any operand is processed if a target resolves inside `/`,
 `/boot`, `/efi`, `/etc`, or `/usr`; this also catches `rm -rf /*`. The guard

@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+passphrase=$(systemd-ask-password \
+    'CarbideOS production signing passphrase:')
+if [ -z "$passphrase" ]; then
+    printf '%s\n' 'The production signing passphrase cannot be empty.' >&2
+    exit 1
+fi
+export CARBIDEOS_PRODUCTION_KEY_PASSPHRASE="$passphrase"
+cleanup() {
+    unset CARBIDEOS_PRODUCTION_KEY_PASSPHRASE passphrase
+}
+trap cleanup EXIT HUP INT TERM
+
+./scripts/build --fleet
+./extensions/rat-game-16/build --fleet
+./scripts/package --fleet
+./scripts/sign --fleet
+./scripts/verify --fleet

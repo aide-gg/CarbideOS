@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+PATH=/usr/sbin:/usr/bin
+export PATH
+unset CDPATH ENV BASH_ENV GPG_TTY SSH_AUTH_SOCK
+
+[ "$(id -u)" -eq 0 ] || {
+    printf '%s\n' 'carbideos-ops must be invoked through sudo.' >&2
+    exit 1
+}
+
+usage() {
+    printf '%s\n' \
+        'Usage: carbideos-ops health|logs|reboot|poweroff|update' \
+        '       carbideos-ops extension install|remove rat-game-16' >&2
+    exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+operation=$1
+shift
+/usr/bin/logger --priority=authpriv.notice --tag=carbideos-ops -- \
+    "operator=${SUDO_USER:-unknown} operation=$operation arguments=$*"
+
+case "$operation" in
+    health)
+        [ "$#" -eq 0 ] || usage
+        /usr/bin/env -i PATH="$PATH" \
+            /usr/bin/systemctl --failed --no-pager
+        /usr/bin/env -i PATH="$PATH" \
+            /usr/bin/systemctl is-system-running --wait
+        ;;
+    logs)
+        [ "$#" -eq 0 ] || usage
+        exec /usr/bin/env -i PATH="$PATH" \
+            /usr/bin/journalctl --boot --priority=warning..alert \
+                --lines=300 --no-pager
+        ;;
+    reboot)
+        [ "$#" -eq 0 ] || usage
+        exec /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl reboot
+        ;;
+    poweroff)
+        [ "$#" -eq 0 ] || usage
+        exec /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl poweroff
+        ;;
+    update)
+        [ "$#" -eq 0 ] || usage
+        exec /usr/bin/env -i PATH="$PATH" \
+            /usr/lib/systemd/systemd-sysupdate update
+        ;;
+    extension)
+        [ "$#" -eq 2 ] || usage
+        case "$1:$2" in
+            install:rat-game-16|remove:rat-game-16)
+                exec /usr/bin/env -i PATH="$PATH" \
+                    /usr/sbin/carbideos-extension "$1" "$2"
+                ;;
+            *) usage ;;
+        esac
+        ;;
+    *) usage ;;
+esac
