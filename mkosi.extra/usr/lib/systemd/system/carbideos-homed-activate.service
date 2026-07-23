@@ -10,6 +10,8 @@ Before=getty.target sshd.service
 Type=notify
 NotifyAccess=all
 ExecStart=/usr/libexec/carbideos-homed-activate
+Restart=on-failure
+RestartSec=2s
 
 [Install]
 WantedBy=multi-user.target

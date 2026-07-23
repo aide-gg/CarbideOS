@@ -58,7 +58,11 @@ if grep -Eq '^(PasswordAuthentication yes|AllowUsers .*ace-bootstrap)' \
     printf '%s\n' 'Production SSH configuration enables a migration login.' >&2
     exit 1
 fi
-if ! grep -Fq 'systemd-notify --ready; exec /usr/bin/sleep infinity' \
+if ! grep -Fq "grep -Fq '\"state\":\"active\"'" \
+    mkosi.extra/usr/libexec/carbideos-homed-activate || \
+   ! grep -Fqx '        systemd-notify --ready' \
+    mkosi.extra/usr/libexec/carbideos-homed-activate || \
+   ! grep -Fq 'homectl with ace-mgmt /usr/bin/sleep infinity &' \
     mkosi.extra/usr/libexec/carbideos-homed-activate || \
    ! grep -Fqx 'Type=notify' \
     mkosi.extra/usr/lib/systemd/system/carbideos-homed-activate.service; then

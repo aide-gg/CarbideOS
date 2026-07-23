@@ -26,5 +26,38 @@ if ! homectl inspect ace-mgmt >/dev/null 2>&1; then
         -P
 fi
 
-exec env PASSWORD="$password" homectl with ace-mgmt /bin/sh -c \
-    'systemd-notify --ready; exec /usr/bin/sleep infinity'
+child=
+# shellcheck disable=SC2317
+cleanup() {
+    [ -z "$child" ] || kill "$child" 2>/dev/null || true
+    [ -z "$child" ] || wait "$child" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+env PASSWORD="$password" homectl with ace-mgmt /usr/bin/sleep infinity &
+child=$!
+unset password
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    if ! kill -0 "$child" 2>/dev/null; then
+        wait "$child"
+        exit $?
+    fi
+    if homectl inspect ace-mgmt --json=short 2>/dev/null | \
+        grep -Fq '"state":"active"'; then
+        systemd-notify --ready
+        if wait "$child"; then
+            status=0
+        else
+            status=$?
+        fi
+        child=
+        exit "$status"
+    fi
+    sleep 0.1
+done
+
+printf '%s\n' 'Timed out waiting for the ace-mgmt home to activate.' >&2
+exit 1
