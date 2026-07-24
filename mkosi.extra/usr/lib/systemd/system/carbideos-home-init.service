@@ -9,6 +9,7 @@ Before=systemd-homed.service sshd.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/systemd-tmpfiles --create --prefix=/home
+ExecStart=/usr/sbin/restorecon -RF /home
 RemainAfterExit=yes
 
 [Install]

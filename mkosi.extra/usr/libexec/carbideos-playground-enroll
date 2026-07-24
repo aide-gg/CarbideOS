@@ -34,6 +34,7 @@ NEWPASSWORD="$password" homectl create "$username" \
     --password-change-now=no \
     -P
 unset password
+/usr/sbin/restorecon -RF "/home/$username.homedir"
 
 install -d -m 0700 /var/lib/carbideos
 touch /var/lib/carbideos/playground-enrolled

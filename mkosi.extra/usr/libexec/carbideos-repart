@@ -18,6 +18,25 @@ fi
 # Imported raw images retain their backup GPT at the original image boundary.
 sfdisk --no-reread --no-tell-kernel --relocate gpt-bak-std "$disk"
 
+# GPT partition labels are limited to 36 UTF-16 characters. The full
+# Playground identity does not fit with the verity-signature suffix.
+# shellcheck disable=SC1091
+. /usr/lib/os-release
+case "$IMAGE_ID" in
+    carbideos-playground) signature_prefix=carbideos-pg ;;
+    carbideos-fleet) signature_prefix=carbideos-fleet ;;
+    carbideos-debug) signature_prefix=carbideos ;;
+    carbideos) signature_prefix=carbideos ;;
+    *) printf 'Unknown image identity: %s\n' "$IMAGE_ID" >&2; exit 1 ;;
+esac
+signature_label="${signature_prefix}_${IMAGE_VERSION}_verity_sig"
+case "$(sfdisk --part-label "$disk" 4)" in
+    root-x86-64-verity-sig)
+        sfdisk --no-reread --no-tell-kernel \
+            --part-label "$disk" 4 "$signature_label"
+        ;;
+esac
+
 definitions=/run/carbideos-repart.d
 rm -rf "$definitions"
 cp -a /usr/lib/carbideos/repart.d "$definitions"

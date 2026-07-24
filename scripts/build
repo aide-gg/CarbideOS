@@ -181,6 +181,9 @@ if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
     else
         channel=playground
         prefix=carbideos-playground
+        install -d -m 0755 "$extra/usr/lib/systemd/system-preset"
+        printf '%s\n' 'enable carbideos-playground-enroll.service' \
+            >"$extra/usr/lib/systemd/system-preset/01-carbideos-playground.preset"
     fi
     install -d -m 0755 \
         "$extra/usr/lib/sysupdate.d" \
@@ -191,6 +194,12 @@ if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
             -e "s|https://updates.aide.gg/carbideos|https://updates.aide.gg/carbideos/$channel|g" \
             -e "s/carbideos_/${prefix}_/g" \
             "$transfer" >"$destination"
+        if [ "$variant" = playground ] && \
+           [ "$(basename "$transfer")" = 10-root-verity-sig.transfer ]; then
+            sed -i \
+                's/carbideos-playground_@v_verity_sig/carbideos-pg_@v_verity_sig/' \
+                "$destination"
+        fi
     done
     sed "s|https://updates.aide.gg/carbideos/|https://updates.aide.gg/carbideos/$channel/|g" \
         mkosi.extra/usr/sbin/carbideos-extension \

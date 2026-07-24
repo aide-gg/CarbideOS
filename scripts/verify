@@ -69,6 +69,15 @@ if ! grep -Fq "grep -Fq '\"state\":\"active\"'" \
     printf '%s\n' 'Homed activation must retain a boot-long home reference.' >&2
     exit 1
 fi
+# The enrollment command is matched literally.
+# shellcheck disable=SC2016
+if ! grep -Fqx 'ExecStart=/usr/sbin/restorecon -RF /home' \
+        mkosi.extra/usr/lib/systemd/system/carbideos-home-init.service || \
+   ! grep -Fqx '/usr/sbin/restorecon -RF "/home/$username.homedir"' \
+        mkosi.extra/usr/libexec/carbideos-playground-enroll; then
+    printf '%s\n' 'Homed backing directories must receive SELinux labels.' >&2
+    exit 1
+fi
 if ! grep -qx 'Mode=0600' \
     mkosi.extra/usr/lib/sysupdate.d/90-uki.transfer; then
     printf '%s\n' 'UKI transfer must remain root-writable for boot counting.' >&2
@@ -133,6 +142,12 @@ for command in jq mdir sbverify sfdisk systemd-dissect zstd; do
         exit 1
     fi
 done
+if [ "$variant" = playground ] && \
+   ! command -v dump.erofs >/dev/null 2>&1 && \
+   [ ! -x /usr/sbin/dump.erofs ]; then
+    printf '%s\n' 'Missing required verification command: dump.erofs' >&2
+    exit 1
+fi
 sfdisk=${SFDISK:-$(command -v sfdisk || true)}
 [ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk
 
@@ -219,6 +234,55 @@ zstd --long=31 --decompress --stdout "$image" >"$raw"
 
 root_uuid=$("$sfdisk" --part-uuid "$raw" 2 | tr '[:upper:]' '[:lower:]')
 verity_uuid=$("$sfdisk" --part-uuid "$raw" 3 | tr '[:upper:]' '[:lower:]')
+if [ "$variant" = playground ]; then
+    root_offset=$("$sfdisk" --json "$raw" | jq -r \
+        '.partitiontable as $t | ($t.partitions[1].start * $t.sectorsize)')
+    if ! dump.erofs --offset="$root_offset" \
+        --path=/etc/systemd/system/multi-user.target.wants/\
+carbideos-playground-enroll.service "$raw" >/dev/null; then
+        printf '%s\n' \
+            'Playground enrollment is not enabled in the finished image.' >&2
+        exit 1
+    fi
+    for pam_profile in system-auth password-auth; do
+        pam_config=$(dump.erofs --cat --offset="$root_offset" \
+            --path="/etc/authselect/$pam_profile" "$raw")
+        homed_auth_line=$(printf '%s\n' "$pam_config" | grep -n \
+            '^-auth .*\[success=done .*pam_systemd_home\.so$' | cut -d: -f1)
+        unix_auth_line=$(printf '%s\n' "$pam_config" | grep -n \
+            '^auth .*pam_unix\.so' | cut -d: -f1)
+        if [ -z "$homed_auth_line" ] || [ -z "$unix_auth_line" ] || \
+           [ "$homed_auth_line" -ge "$unix_auth_line" ] || \
+           ! printf '%s\n' "$pam_config" | \
+                grep -q '^-session .*required pam_systemd_home\.so$'; then
+            printf 'Playground %s must activate homed first.\n' \
+                "$pam_profile" >&2
+            exit 1
+        fi
+    done
+    home_init=$(dump.erofs --cat --offset="$root_offset" \
+        --path=/usr/lib/systemd/system/carbideos-home-init.service "$raw")
+    enrollment=$(dump.erofs --cat --offset="$root_offset" \
+        --path=/usr/libexec/carbideos-playground-enroll "$raw")
+    # The enrollment command is matched literally.
+    # shellcheck disable=SC2016
+    if ! printf '%s\n' "$home_init" | \
+            grep -Fqx 'ExecStart=/usr/sbin/restorecon -RF /home' || \
+       ! printf '%s\n' "$enrollment" | grep -Fqx \
+            '/usr/sbin/restorecon -RF "/home/$username.homedir"'; then
+        printf '%s\n' \
+            'Finished image does not label homed backing directories.' >&2
+        exit 1
+    fi
+    signature_transfer=$(dump.erofs --cat --offset="$root_offset" \
+        --path=/usr/lib/sysupdate.d/10-root-verity-sig.transfer "$raw")
+    if ! printf '%s\n' "$signature_transfer" | \
+            grep -Fqx 'MatchPattern=carbideos-pg_@v_verity_sig'; then
+        printf '%s\n' \
+            'Playground signature-slot label exceeds GPT limits.' >&2
+        exit 1
+    fi
+fi
 if [ "$(basename "$root_artifact")" != \
     "${update_prefix}_${version}_${root_uuid}.root.raw.zst" ]; then
     printf '%s\n' 'Root artifact filename does not contain its GPT UUID.' >&2

@@ -64,6 +64,26 @@ else
     passwd --lock root
 fi
 
+if [ "$variant" = playground ]; then
+    # Fedora checks pam_unix before homed and treats home activation as
+    # optional. Require homed authentication and its mount before tty login.
+    for pam_profile in system-auth password-auth; do
+        profile="/usr/share/authselect/default/local/$pam_profile"
+        sed -i '/pam_systemd_home\.so.*with-systemd-homed/d' "$profile"
+        sed -i \
+            '/auth .*pam_unix\.so/i\-auth       [success=done authtok_err=bad perm_denied=bad maxtries=bad default=ignore] pam_systemd_home.so {include if "with-systemd-homed"}' \
+            "$profile"
+        sed -i \
+            '/account .*pam_unix\.so/i\-account    [success=done authtok_expired=bad new_authtok_reqd=bad maxtries=bad acct_expired=bad default=ignore] pam_systemd_home.so {include if "with-systemd-homed"}' \
+            "$profile"
+        sed -i \
+            '/password .*pam_pwquality\.so/i\-password   sufficient pam_systemd_home.so {include if "with-systemd-homed"}' \
+            "$profile"
+        sed -i \
+            '/-session .*pam_systemd\.so/i\-session    required pam_systemd_home.so {include if "with-systemd-homed"}' \
+            "$profile"
+    done
+fi
 authselect enable-feature with-systemd-homed
 
 systemctl enable sshd.service systemd-homed.service systemd-networkd.service \
