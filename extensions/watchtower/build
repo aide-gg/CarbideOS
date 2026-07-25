@@ -113,7 +113,7 @@ EOF
 
 epoch=$(git -C "$watchtower_source" log -1 --format=%ct)
 find "$root" -exec touch -h -d "@$epoch" {} +
-mkfs.erofs --quiet --all-root --all-time -T "$epoch" \
+mkfs.erofs --quiet --all-root -T "$epoch" \
     -L watchtower -zlz4hc,level=12 \
     --file-contexts=extensions/watchtower/file-contexts \
     "$work/root.erofs" "$root"
