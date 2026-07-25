@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=CarbideOS system extension storage
+After=dev-disk-by\x2dlabel-carbide\x2dextensions.device
+Requires=dev-disk-by\x2dlabel-carbide\x2dextensions.device
+Before=local-fs.target systemd-sysext.service
+
+[Mount]
+What=/dev/disk/by-label/carbide-extensions
+Where=/var/lib/extensions
+Type=btrfs
+Options=noexec,nosuid,nodev,rootcontext=system_u:object_r:var_lib_t:s0
+
+[Install]
+WantedBy=local-fs.target

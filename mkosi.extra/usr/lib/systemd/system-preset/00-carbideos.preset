@@ -16,6 +16,7 @@ enable systemd-resolved.service
 enable systemd-sysext.service
 enable var.mount
 enable var-lib-carbideos-workload.mount
+enable var-lib-extensions.mount
 enable systemd-homed.service
 disable systemd-importd.service
 disable systemd-importd.socket
