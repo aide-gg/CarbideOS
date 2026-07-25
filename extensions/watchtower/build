@@ -1,0 +1,154 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+umask 022
+
+cd "$(dirname "$0")/../.."
+variant=development
+case "${1-}" in
+    '') ;;
+    --fleet) variant=fleet ;;
+    --playground) variant=playground ;;
+    *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
+esac
+
+version=${CARBIDEOS_EXTENSION_VERSION:-$(tr -d '[:space:]' <mkosi.version)}
+watchtower_source=${WATCHTOWER_SOURCE:-../watchtower}
+bun_version=1.3.14
+bun_archive=bun-linux-x64-baseline.zip
+bun_sha256=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7
+bun_url="https://github.com/oven-sh/bun/releases/download/bun-v${bun_version}/${bun_archive}"
+
+case "$variant" in
+    fleet)
+        output="$PWD/dist/extensions/fleet/watchtower"
+        signing_key=keys/production/sysext/sysext.key
+        signing_cert=keys/production/sysext/sysext.crt
+        release_pub=keys/production/manifest/release-signing.pub.asc
+        ;;
+    playground)
+        output="$PWD/dist/extensions/playground/watchtower"
+        signing_key=keys/playground/sysext/sysext.key
+        signing_cert=keys/playground/sysext/sysext.crt
+        release_pub=keys/playground/manifest/release-signing.pub.asc
+        ;;
+    *)
+        output="$PWD/dist/extensions/watchtower"
+        signing_key=keys/secureboot/secure-boot.key
+        signing_cert=keys/secureboot/secure-boot.crt
+        release_pub=keys/manifest/release-signing.pub.asc
+        ;;
+esac
+
+for command in cargo curl gpg mkfs.erofs openssl sha256sum systemd-repart unzip; do
+    command -v "$command" >/dev/null 2>&1 || {
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    }
+done
+for file in "$signing_key" "$signing_cert" "$release_pub"; do
+    [ -s "$file" ] || { printf 'Missing %s\n' "$file" >&2; exit 1; }
+done
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    passphrase=${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}
+    [ -n "$passphrase" ] || passphrase=$(systemd-ask-password \
+        "CarbideOS $variant signing passphrase:")
+    export CARBIDEOS_SIGNING_KEY_PASSPHRASE="$passphrase"
+    openssl pkey -in "$signing_key" \
+        -passin env:CARBIDEOS_SIGNING_KEY_PASSPHRASE \
+        -out "$work/sysext.key"
+    chmod 0600 "$work/sysext.key"
+    signing_key="$work/sysext.key"
+    unset CARBIDEOS_SIGNING_KEY_PASSPHRASE passphrase
+fi
+
+cargo build --manifest-path="$watchtower_source/Cargo.toml" --release --locked
+watchtower_binary="$watchtower_source/target/release/watchtower"
+[ -x "$watchtower_binary" ] || { printf 'Missing %s\n' "$watchtower_binary" >&2; exit 1; }
+
+curl -LfsS "$bun_url" -o "$work/$bun_archive"
+printf '%s  %s\n' "$bun_sha256" "$work/$bun_archive" | sha256sum -c -
+unzip -q "$work/$bun_archive" -d "$work/bun"
+
+root="$work/root"
+install -d \
+    "$root/usr/bin" \
+    "$root/usr/libexec" \
+    "$root/usr/lib/systemd/system" \
+    "$root/usr/lib/extension-release.d" \
+    "$root/usr/lib/watchtower" \
+    "$output"
+install -m 0755 "$watchtower_binary" "$root/usr/libexec/watchtower"
+install -m 0755 "$watchtower_source/dist/carbideos-ace-prepare" \
+    "$root/usr/libexec/carbideos-ace-prepare"
+install -m 0755 "$work/bun/bun-linux-x64-baseline/bun" "$root/usr/bin/bun"
+install -m 0644 "$watchtower_source/dist/watchtower-carbideos.service" \
+    "$root/usr/lib/systemd/system/watchtower.service"
+install -m 0644 "$watchtower_source/dist/ace@.service" \
+    "$root/usr/lib/systemd/system/ace@.service"
+install -m 0644 "$watchtower_source/dist/run-carbide.mount" \
+    "$root/usr/lib/systemd/system/run-carbide.mount"
+install -m 0644 "$watchtower_source/dist/ace-browser-smoke.service" \
+    "$root/usr/lib/systemd/system/ace-browser-smoke.service"
+install -d "$root/usr/lib/systemd/system/multi-user.target.wants"
+ln -s ../watchtower.service \
+    "$root/usr/lib/systemd/system/multi-user.target.wants/watchtower.service"
+install -m 0644 "$watchtower_source/dist/watchtower-carbideos.toml" \
+    "$root/usr/lib/watchtower/config.toml"
+gpg --batch --yes --dearmor \
+    --output "$root/usr/lib/watchtower/release-signing.gpg" "$release_pub"
+cat >"$root/usr/lib/extension-release.d/extension-release.watchtower" <<EOF
+ID=carbideos
+VERSION_ID=$version
+SYSEXT_LEVEL=1
+ARCHITECTURE=x86-64
+SYSEXT_ID=watchtower
+SYSEXT_VERSION_ID=$(sed -n 's/^version = "\(.*\)"/\1/p' "$watchtower_source/Cargo.toml" | head -1)
+EOF
+
+epoch=$(git -C "$watchtower_source" log -1 --format=%ct)
+find "$root" -exec touch -h -d "@$epoch" {} +
+mkfs.erofs --quiet --all-root --all-time -T "$epoch" \
+    -L watchtower -zlz4hc,level=12 \
+    --file-contexts=extensions/watchtower/file-contexts \
+    "$work/root.erofs" "$root"
+
+definitions="$work/repart.d"
+install -d "$definitions"
+cat >"$definitions/10-root.conf" <<EOF
+[Partition]
+Type=root
+CopyBlocks=$work/root.erofs
+Verity=data
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/20-root-verity.conf" <<EOF
+[Partition]
+Type=root-verity
+Verity=hash
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/30-root-verity-sig.conf" <<EOF
+[Partition]
+Type=root-verity-sig
+Verity=signature
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+rm -f "$output/watchtower.raw"
+systemd-repart --empty=create --size=192M \
+    --seed=9f715775-f522-468b-8e4f-00b8516874ec \
+    --definitions="$definitions" \
+    --private-key="$signing_key" \
+    --certificate="$signing_cert" \
+    "$output/watchtower.raw"
+(
+    cd "$output"
+    sha256sum watchtower.raw >SHA256SUMS
+)
+printf 'Built Watchtower sysext for CarbideOS %s in %s\n' "$version" "$output"

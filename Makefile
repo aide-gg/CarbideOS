@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-.PHONY: keys production-keys production-sysext-cert playground-keys build debug fleet playground extensions fleet-extensions playground-extensions package fleet-package playground-package sign fleet-sign playground-sign verify pipeline fleet-pipeline playground-pipeline publish-r2 publish-fleet publish-playground clean clean-tools
+.PHONY: keys production-keys production-sysext-cert playground-keys build debug fleet playground extensions watchtower-extension chrome-extension ace-package aide-extensions fleet-extensions playground-extensions package fleet-package playground-package sign fleet-sign playground-sign verify pipeline fleet-pipeline playground-pipeline publish-r2 publish-fleet publish-playground clean clean-tools
 
 keys:
 	./scripts/provision-keys
@@ -28,6 +28,17 @@ playground:
 
 extensions:
 	./extensions/rat-game-16/build
+
+watchtower-extension:
+	./extensions/watchtower/build
+
+chrome-extension:
+	./extensions/chrome/build
+
+ace-package:
+	./scripts/package-ace
+
+aide-extensions: watchtower-extension chrome-extension ace-package
 
 fleet-extensions:
 	./extensions/rat-game-16/build --fleet

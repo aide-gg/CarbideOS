@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+/opt                          system_u:object_r:usr_t:s0
+/opt/google(/.*)?             system_u:object_r:usr_t:s0
+/usr                          system_u:object_r:usr_t:s0
+/usr/bin(/.*)?                system_u:object_r:bin_t:s0
+/usr/lib(/.*)?                system_u:object_r:lib_t:s0
+/usr/lib64(/.*)?              system_u:object_r:lib_t:s0
+/usr/share(/.*)?              system_u:object_r:usr_t:s0

@@ -1,0 +1,215 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+umask 022
+
+cd "$(dirname "$0")/../.."
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo --preserve-env=CARBIDEOS_SIGNING_KEY_PASSPHRASE,CARBIDEOS_EXTENSION_VERSION \
+        "$PWD/extensions/chrome/build" "$@"
+fi
+variant=development
+case "${1-}" in
+    '') ;;
+    --fleet) variant=fleet ;;
+    --playground) variant=playground ;;
+    *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
+esac
+
+version=${CARBIDEOS_EXTENSION_VERSION:-$(tr -d '[:space:]' <mkosi.version)}
+chrome_version=150.0.7871.186-1
+chrome_sha256=918565ec80808f179b9b768f173af200d9c97f0a424700a510084a8a593d2796
+chrome_url=https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
+google_key_url=https://dl.google.com/linux/linux_signing_key.pub
+
+case "$variant" in
+    fleet)
+        output="$PWD/dist/extensions/fleet/chrome"
+        signing_key=keys/production/sysext/sysext.key
+        signing_cert=keys/production/sysext/sysext.crt
+        ;;
+    playground)
+        output="$PWD/dist/extensions/playground/chrome"
+        signing_key=keys/playground/sysext/sysext.key
+        signing_cert=keys/playground/sysext/sysext.crt
+        ;;
+    *)
+        output="$PWD/dist/extensions/chrome"
+        signing_key=keys/secureboot/secure-boot.key
+        signing_cert=keys/secureboot/secure-boot.crt
+        ;;
+esac
+
+for command in curl jq mkfs.erofs mkosi openssl rpm rpmkeys sha256sum systemd-repart; do
+    command -v "$command" >/dev/null 2>&1 || {
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    }
+done
+for file in "$signing_key" "$signing_cert"; do
+    [ -s "$file" ] || { printf 'Missing %s\n' "$file" >&2; exit 1; }
+done
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    passphrase=${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}
+    [ -n "$passphrase" ] || passphrase=$(systemd-ask-password \
+        "CarbideOS $variant signing passphrase:")
+    export CARBIDEOS_SIGNING_KEY_PASSPHRASE="$passphrase"
+    openssl pkey -in "$signing_key" \
+        -passin env:CARBIDEOS_SIGNING_KEY_PASSPHRASE \
+        -out "$work/sysext.key"
+    chmod 0600 "$work/sysext.key"
+    signing_key="$work/sysext.key"
+    unset CARBIDEOS_SIGNING_KEY_PASSPHRASE passphrase
+fi
+
+chrome_rpm="$work/google-chrome.rpm"
+curl -LfsS "$chrome_url" -o "$chrome_rpm"
+printf '%s  %s\n' "$chrome_sha256" "$chrome_rpm" | sha256sum -c -
+actual_version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$chrome_rpm")
+[ "$actual_version" = "$chrome_version" ] || {
+    printf 'Chrome version mismatch: expected %s, got %s\n' \
+        "$chrome_version" "$actual_version" >&2
+    exit 1
+}
+
+rpmdb="$work/rpmdb"
+install -d "$rpmdb" "$output"
+curl -LfsS "$google_key_url" -o "$work/google-linux-signing-key.pub"
+rpm --dbpath "$rpmdb" --initdb
+rpmkeys --dbpath "$rpmdb" --import "$work/google-linux-signing-key.pub"
+rpmkeys --dbpath "$rpmdb" --checksig "$chrome_rpm" | grep -q 'digests signatures OK$'
+
+project="$work/mkosi"
+install -d "$project"
+cat >"$project/mkosi.conf" <<EOF
+[Distribution]
+Distribution=fedora
+Release=44
+
+[Output]
+Format=directory
+Output=root
+OutputDirectory=../staging
+
+[Content]
+Packages=alsa-lib
+         at-spi2-atk
+         at-spi2-core
+         cairo
+         cups-libs
+         dbus-libs
+         expat
+         glib2
+         gtk3
+         liberation-fonts
+         libcurl
+         libX11
+         libxcb
+         libXcomposite
+         libXdamage
+         libXext
+         libXfixes
+         libxkbcommon
+         libXrandr
+         mesa-libgbm
+         nspr
+         nss
+         pango
+         systemd-libs
+         vulkan-loader
+WithDocs=no
+CleanPackageMetadata=yes
+EOF
+mkosi -C "$project" build
+installroot="$work/staging/root"
+rpm --root "$installroot" --nodeps --noscripts -i "$chrome_rpm"
+
+root="$work/root"
+install -d "$root"
+[ -d "$installroot/usr" ] && cp -a "$installroot/usr" "$root/"
+[ -d "$installroot/opt" ] && cp -a "$installroot/opt" "$root/"
+
+# Files already supplied by this exact CarbideOS build must not be shadowed by
+# the extension. Keep only Chrome and packages absent from the base manifest.
+case "$variant" in
+    fleet) base_manifest=mkosi.output/carbideos-fleet.manifest ;;
+    playground) base_manifest=mkosi.output/carbideos-playground.manifest ;;
+    *) base_manifest=mkosi.output/carbideos.manifest ;;
+esac
+[ -s "$base_manifest" ] || {
+    printf 'Missing base image manifest: %s\n' "$base_manifest" >&2
+    exit 1
+}
+jq -r '.packages[] | select(.type == "rpm") | .name' "$base_manifest" \
+    | while IFS= read -r package; do
+        rpm --root "$installroot" -q "$package" >/dev/null 2>&1 || continue
+        rpm --root "$installroot" -ql "$package" \
+            | while IFS= read -r path; do
+                [ -d "$root$path" ] || rm -f "$root$path"
+            done
+    done
+
+find "$root/usr" -depth -type d -empty -delete
+install -d "$root/usr/bin" "$root/usr/lib/extension-release.d"
+rm -f "$root/usr/lib/os-release"
+rm -f "$root/usr/bin/google-chrome"
+ln -s /opt/google/chrome/google-chrome "$root/usr/bin/google-chrome"
+cat >"$root/usr/lib/extension-release.d/extension-release.chrome" <<EOF
+ID=carbideos
+VERSION_ID=$version
+SYSEXT_LEVEL=1
+ARCHITECTURE=x86-64
+SYSEXT_ID=chrome
+SYSEXT_VERSION_ID=$chrome_version
+EOF
+
+epoch=$(rpm -qp --qf '%{BUILDTIME}' "$chrome_rpm")
+find "$root" -exec touch -h -d "@$epoch" {} +
+mkfs.erofs --quiet --all-root --all-time -T "$epoch" \
+    -L chrome -zlz4hc,level=12 \
+    --file-contexts=extensions/chrome/file-contexts \
+    "$work/root.erofs" "$root"
+
+definitions="$work/repart.d"
+install -d "$definitions"
+cat >"$definitions/10-root.conf" <<EOF
+[Partition]
+Type=root
+CopyBlocks=$work/root.erofs
+Verity=data
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/20-root-verity.conf" <<EOF
+[Partition]
+Type=root-verity
+Verity=hash
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/30-root-verity-sig.conf" <<EOF
+[Partition]
+Type=root-verity-sig
+Verity=signature
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+rm -f "$output/chrome.raw"
+systemd-repart --empty=create --size=512M \
+    --seed=4d8ec194-c9a5-4911-a1ba-37259165044c \
+    --definitions="$definitions" \
+    --private-key="$signing_key" \
+    --certificate="$signing_cert" \
+    "$output/chrome.raw"
+(
+    cd "$output"
+    sha256sum chrome.raw >SHA256SUMS
+)
+if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+    chown -R "$SUDO_UID:$SUDO_GID" "$output"
+fi
+printf 'Built Chrome %s sysext for CarbideOS %s in %s\n' \
+    "$chrome_version" "$version" "$output"

@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+/usr                          system_u:object_r:usr_t:s0
+/usr/bin(/.*)?                system_u:object_r:bin_t:s0
+/usr/lib(/.*)?                system_u:object_r:lib_t:s0
+/usr/libexec(/.*)?            system_u:object_r:bin_t:s0
