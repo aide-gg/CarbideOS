@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-.PHONY: keys production-keys production-sysext-cert playground-keys build debug fleet playground extensions watchtower-extension chrome-extension ace-package aide-extensions fleet-extensions playground-extensions package fleet-package playground-package sign fleet-sign playground-sign verify pipeline fleet-pipeline playground-pipeline publish-r2 publish-fleet publish-playground clean clean-tools
+.PHONY: keys production-keys production-sysext-cert playground-keys build debug fleet playground extensions watchtower-extension chrome-extension ace-package aide-extensions fleet-extensions playground-extensions package fleet-package playground-package sign fleet-sign playground-sign verify pipeline fleet-pipeline playground-pipeline publish-r2 prune-r2 publish-fleet publish-playground clean clean-tools
 
 keys:
 	./scripts/provision-keys
@@ -86,6 +86,10 @@ publish-playground:
 publish-r2:
 	@test -n "$(SOURCE)" || { echo 'Usage: make publish-r2 SOURCE=dist/update-feed' >&2; exit 2; }
 	./scripts/publish-r2 "$(SOURCE)"
+
+prune-r2:
+	@test -n "$(SOURCE)" || { echo 'Usage: make prune-r2 SOURCE=dist/update-feed [APPLY=1]' >&2; exit 2; }
+	./scripts/prune-r2 "$(SOURCE)" $(if $(APPLY),--apply,)
 
 clean:
 	sudo find mkosi.output -maxdepth 1 \( -type f -o -type l \) -name 'carbideos*' -delete 2>/dev/null || true

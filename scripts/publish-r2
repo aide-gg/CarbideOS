@@ -7,10 +7,34 @@ CARBIDEOS_R2_ENDPOINT=${CARBIDEOS_R2_ENDPOINT:-https://ef3f312260e602feb99ad7481
 CARBIDEOS_R2_BUCKET=${CARBIDEOS_R2_BUCKET:-aidegg-updates}
 export CARBIDEOS_R2_ENDPOINT CARBIDEOS_R2_BUCKET
 
-if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then
-    printf 'Usage: %s UPDATE_DIRECTORY\n' "$0" >&2
+adopt_existing=0
+source_directory=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        # Payload identity is normally proven from the remote manifest. An
+        # object published before the feed retained multiple versions predates
+        # that record, so adopting it re-uploads bytes the local signed
+        # manifest already vouches for.
+        --adopt-existing) adopt_existing=1 ;;
+        -*)
+            printf 'Usage: %s UPDATE_DIRECTORY [--adopt-existing]\n' "$0" >&2
+            exit 2
+            ;;
+        *)
+            if [ -n "$source_directory" ]; then
+                printf 'Usage: %s UPDATE_DIRECTORY [--adopt-existing]\n' "$0" >&2
+                exit 2
+            fi
+            source_directory=$1
+            ;;
+    esac
+    shift
+done
+if [ -z "$source_directory" ] || [ ! -d "$source_directory" ]; then
+    printf 'Usage: %s UPDATE_DIRECTORY [--adopt-existing]\n' "$0" >&2
     exit 2
 fi
+set -- "$source_directory"
 
 for command in aws gpg jq; do
     if ! command -v "$command" >/dev/null 2>&1; then
@@ -200,16 +224,26 @@ upload() {
     esac
 
     printf 'Uploading %s\n' "$key"
-    aws_r2 s3 cp \
-        "$source/$relative" "s3://$CARBIDEOS_R2_BUCKET/$key" \
+    set -- \
         --no-progress --only-show-errors \
         --cache-control "$cache_control" --content-type "$content_type"
+    # Record the digest on the object so a later publish can prove the payload
+    # is unchanged without depending on whichever manifest happens to be live.
+    hash=$(manifest_hash "$relative" "$source/SHA256SUMS")
+    if [ -n "$hash" ]; then
+        set -- "$@" --metadata "sha256=$hash"
+    fi
+    aws_r2 s3 cp "$source/$relative" "s3://$CARBIDEOS_R2_BUCKET/$key" "$@"
+}
+
+manifest_hash() {
+    awk -v file="$1" \
+        'substr($0, 67) == file { print substr($0, 1, 64); exit }' "$2"
 }
 
 unchanged_payload() {
     relative=$1
     size=$2
-    [ "$remote_manifest_valid" -eq 1 ] || return 1
 
     key=$relative
     [ -n "$prefix" ] && key="$prefix/$relative"
@@ -217,13 +251,23 @@ unchanged_payload() {
         '[.Contents[]? | select(.Key == $key) | .Size][0] // 0' "$remote")
     [ "$existing" -eq "$size" ] || return 1
 
-    local_hash=$(awk -v file="$relative" \
-        'substr($0, 67) == file { print substr($0, 1, 64); exit }' \
-        "$source/SHA256SUMS")
-    remote_hash=$(awk -v file="$relative" \
-        'substr($0, 67) == file { print substr($0, 1, 64); exit }' \
-        "$remote_sums")
-    [ -n "$local_hash" ] && [ "$local_hash" = "$remote_hash" ]
+    local_hash=$(manifest_hash "$relative" "$source/SHA256SUMS")
+    [ -n "$local_hash" ] || return 1
+
+    # Prefer the digest recorded on the object itself. It stays valid as the
+    # retention window slides, whereas the remote manifest only describes the
+    # versions the feed happened to offer at its last publish.
+    remote_hash=$(aws_r2 s3api head-object \
+        --bucket "$CARBIDEOS_R2_BUCKET" --key "$key" \
+        --query 'Metadata.sha256' --output text 2>/dev/null || true)
+    case "$remote_hash" in
+        None|'') remote_hash='' ;;
+    esac
+    if [ -z "$remote_hash" ] && [ "$remote_manifest_valid" -eq 1 ]; then
+        remote_hash=$(manifest_hash "$relative" "$remote_sums")
+    fi
+
+    [ -n "$remote_hash" ] && [ "$local_hash" = "$remote_hash" ]
 }
 
 while IFS="$tab" read -r relative size; do
@@ -236,9 +280,14 @@ while IFS="$tab" read -r relative size; do
             '[.Contents[]? | select(.Key == $key) | .Size][0] // 0' \
             "$remote")
         if [ "$existing" -ne 0 ]; then
-            printf 'Refusing to replace immutable update payload: %s\n' \
-                "$key" >&2
-            exit 1
+            if [ "$adopt_existing" -eq 0 ]; then
+                printf 'Refusing to replace immutable update payload: %s\n' \
+                    "$key" >&2
+                printf '%s\n' \
+                    'If the local signed manifest describes these exact bytes, re-run with --adopt-existing.' >&2
+                exit 1
+            fi
+            printf 'Adopting existing payload %s\n' "$key"
         fi
         upload "$relative"
     fi

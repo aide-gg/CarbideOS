@@ -1,0 +1,162 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+CARBIDEOS_R2_ENDPOINT=${CARBIDEOS_R2_ENDPOINT:-https://ef3f312260e602feb99ad7481f7a00e4.r2.cloudflarestorage.com}
+CARBIDEOS_R2_BUCKET=${CARBIDEOS_R2_BUCKET:-aidegg-updates}
+export CARBIDEOS_R2_ENDPOINT CARBIDEOS_R2_BUCKET
+
+apply=0
+source_directory=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --apply) apply=1 ;;
+        -*)
+            printf 'Usage: %s UPDATE_DIRECTORY [--apply]\n' "$0" >&2
+            exit 2
+            ;;
+        *)
+            if [ -n "$source_directory" ]; then
+                printf 'Usage: %s UPDATE_DIRECTORY [--apply]\n' "$0" >&2
+                exit 2
+            fi
+            source_directory=$1
+            ;;
+    esac
+    shift
+done
+if [ -z "$source_directory" ] || [ ! -d "$source_directory" ]; then
+    printf 'Usage: %s UPDATE_DIRECTORY [--apply]\n' "$0" >&2
+    exit 2
+fi
+
+for command in aws gpg jq; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+profile=${CARBIDEOS_R2_PROFILE:-}
+if [ -z "$profile" ]; then
+    for variable in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+        eval "value=\${$variable:-}"
+        if [ -z "$value" ]; then
+            printf 'Missing %s or CARBIDEOS_R2_PROFILE.\n' "$variable" >&2
+            exit 1
+        fi
+    done
+fi
+
+source=$(realpath "$source_directory")
+prefix=${CARBIDEOS_R2_PREFIX:-carbideos}
+prefix=${prefix#/}
+prefix=${prefix%/}
+case "$prefix" in
+    carbideos)
+        trusted_release_pub=$PWD/keys/manifest/release-signing.pub.asc
+        ;;
+    carbideos/fleet)
+        trusted_release_pub=$PWD/keys/production/manifest/release-signing.pub.asc
+        ;;
+    carbideos/playground)
+        trusted_release_pub=$PWD/keys/playground/manifest/release-signing.pub.asc
+        ;;
+    *)
+        printf 'Unsupported CarbideOS release prefix: %s\n' "$prefix" >&2
+        exit 1
+        ;;
+esac
+export AWS_DEFAULT_REGION=auto
+
+aws_r2() {
+    if [ -n "$profile" ]; then
+        aws --profile "$profile" --endpoint-url "$CARBIDEOS_R2_ENDPOINT" "$@"
+    else
+        aws --endpoint-url "$CARBIDEOS_R2_ENDPOINT" "$@"
+    fi
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+verify_home="$work/verify-gnupg"
+mkdir -m 0700 "$verify_home"
+remote="$work/remote.json"
+keep="$work/keep"
+stale="$work/stale"
+
+if [ ! -f "$source/SHA256SUMS" ] || [ ! -f "$source/SHA256SUMS.gpg" ]; then
+    printf '%s\n' 'Update directory must contain SHA256SUMS and SHA256SUMS.gpg.' >&2
+    exit 1
+fi
+if [ ! -s "$trusted_release_pub" ]; then
+    printf 'Missing release key for %s: %s\n' "$prefix" "$trusted_release_pub" >&2
+    exit 1
+fi
+
+# The signed manifest is the authoritative statement of which artifacts the
+# feed offers. Anything else under this prefix is unreferenced and cannot be
+# verified by a node, so it is safe to retire.
+GNUPGHOME="$verify_home" gpg --batch --import \
+    "$trusted_release_pub" >/dev/null 2>&1
+GNUPGHOME="$verify_home" gpg --batch --verify \
+    "$source/SHA256SUMS.gpg" "$source/SHA256SUMS"
+
+{
+    printf 'SHA256SUMS\n'
+    printf 'SHA256SUMS.gpg\n'
+    cut -c 67- "$source/SHA256SUMS"
+} | LC_ALL=C sort -u >"$keep"
+
+aws_r2 s3api list-objects-v2 \
+    --bucket "$CARBIDEOS_R2_BUCKET" --prefix "$prefix/" --output json >"$remote"
+
+# Sibling channels live under nested prefixes such as carbideos/fleet, so a
+# key only belongs to this channel when nothing follows its own directory.
+jq -r --arg prefix "$prefix/" '
+    .Contents[]? | select(.Key | startswith($prefix))
+    | (.Key | ltrimstr($prefix)) as $relative
+    | select($relative | contains("/") | not)
+    | select($relative != "")
+    | "\($relative)\t\(.Size)"
+' "$remote" | LC_ALL=C sort >"$work/present"
+
+tab=$(printf '\t')
+: >"$stale"
+total=0
+while IFS="$tab" read -r relative size; do
+    if ! grep -Fxq "$relative" "$keep"; then
+        printf '%s\t%s\n' "$relative" "$size" >>"$stale"
+        total=$((total + size))
+    fi
+done <"$work/present"
+
+if [ ! -s "$stale" ]; then
+    printf 'No unreferenced objects under r2://%s/%s\n' \
+        "$CARBIDEOS_R2_BUCKET" "$prefix"
+    exit 0
+fi
+
+count=$(wc -l <"$stale" | tr -d ' ')
+printf 'Unreferenced objects under r2://%s/%s:\n\n' \
+    "$CARBIDEOS_R2_BUCKET" "$prefix"
+while IFS="$tab" read -r relative size; do
+    printf '  %12s  %s\n' "$size" "$relative"
+done <"$stale"
+printf '\n%s objects, %s bytes\n' "$count" "$total"
+
+if [ "$apply" -eq 0 ]; then
+    printf '\n%s\n' 'Dry run. Re-run with --apply to delete these objects.'
+    exit 0
+fi
+
+while IFS="$tab" read -r relative size; do
+    printf 'Deleting %s/%s\n' "$prefix" "$relative"
+    aws_r2 s3 rm "s3://$CARBIDEOS_R2_BUCKET/$prefix/$relative" \
+        --only-show-errors
+done <"$stale"
+
+final=$(aws_r2 s3api list-objects-v2 \
+    --bucket "$CARBIDEOS_R2_BUCKET" --output json \
+    | jq '[.Contents[]?.Size] | add // 0')
+printf 'Pruned %s objects. Bucket now %s bytes.\n' "$count" "$final"

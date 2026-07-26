@@ -190,6 +190,41 @@ uploaded before `SHA256SUMS.gpg`, and `SHA256SUMS` is uploaded last as the
 release activation point. Versioned payloads receive immutable cache headers;
 the manifest and signature do not.
 
+Each uploaded object records its SHA-256 as object metadata, so a later
+publish can prove a payload is unchanged independently of whichever manifest
+is currently live. A payload that already exists remotely and cannot be shown
+to match is refused rather than replaced. `--adopt-existing` re-uploads such
+an object and is only correct when the local signed manifest describes those
+exact bytes.
+
+## Update Feed Retention
+
+`scripts/sign` hashes whatever the feed directory contains, so the manifest
+decides which versions a node can see. The feed keeps the newest four version
+sets; `CARBIDEOS_FEED_RETENTION` overrides the count. Retaining several lets
+an operator target a specific version and roll the base OS back through the
+feed rather than depending solely on the slot a node still holds:
+
+```bash
+sudo /usr/lib/systemd/systemd-sysupdate list
+```
+
+Retained versions must exist locally under `dist/update-feed/` for `sign` to
+hash them. `dist/` is not tracked, so a wiped build tree narrows the window to
+whatever is rebuilt.
+
+Publishing never deletes anything. Objects outside the window accumulate as
+unreferenced garbage that no node can verify, so prune against the signed
+manifest. The default is a dry run:
+
+```bash
+CARBIDEOS_R2_PROFILE=carbide-r2 make prune-r2 SOURCE=dist/update-feed
+CARBIDEOS_R2_PROFILE=carbide-r2 make prune-r2 SOURCE=dist/update-feed APPLY=1
+```
+
+Pruning is scoped to one channel. Sibling prefixes such as `carbideos/fleet`
+and `carbideos/playground` are never considered.
+
 Administrative credentials are mandatory local build inputs under the
 gitignored `keys/admin/` directory:
 
