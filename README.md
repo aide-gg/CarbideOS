@@ -255,7 +255,14 @@ service. CarbideOS configures systemd to service it every 60 seconds.
 The current build implements the A/B base update transport, counted emergency
 retries, and TPM/LUKS state, but intentionally does not yet implement automatic
 update scheduling, application-aware boot health checks, volatile `/etc`,
-carbideos-agent, workload sandboxing, or any closed-source AIde component.
+`carbide-agent`, workload sandboxing, or any closed-source AIde component.
+
+System extensions therefore have no automatic recovery yet. A broken extension
+merges cleanly, the node boots healthy, and whatever the extension provided is
+simply missing — the boot is still blessed. `CARBIDE-AGENT.md` specifies the
+component that closes this, including the required-extension set, the health
+ruleset extensions ship inside themselves, image slot naming, and the boot
+gate.
 
 ## License
 
