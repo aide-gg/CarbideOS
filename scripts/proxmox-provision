@@ -1,0 +1,180 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Rebuild a Proxmox VM from a CarbideOS image. Every node is disposable, so
+# provisioning replaces the boot disk outright rather than updating in place.
+# A partition layout change cannot be applied to a running node: repart grows
+# a partition into adjacent free space and never relocates one, so a node laid
+# out by an older image has to be recreated.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+size=16G
+assume_yes=0
+vmid=
+image=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --size)
+            [ "$#" -ge 2 ] || { printf '%s\n' 'Missing --size value.' >&2; exit 2; }
+            size=$2
+            shift
+            ;;
+        --yes) assume_yes=1 ;;
+        -*)
+            printf 'Usage: %s VMID IMAGE [--size 16G] [--yes]\n' "$0" >&2
+            exit 2
+            ;;
+        *)
+            if [ -z "$vmid" ]; then
+                vmid=$1
+            elif [ -z "$image" ]; then
+                image=$1
+            else
+                printf 'Usage: %s VMID IMAGE [--size 16G] [--yes]\n' "$0" >&2
+                exit 2
+            fi
+            ;;
+    esac
+    shift
+done
+if [ -z "$vmid" ] || [ -z "$image" ]; then
+    printf 'Usage: %s VMID IMAGE [--size 16G] [--yes]\n' "$0" >&2
+    exit 2
+fi
+if [ ! -s "$image" ]; then
+    printf 'Missing image: %s\n' "$image" >&2
+    exit 1
+fi
+
+for command in curl jq; do
+    command -v "$command" >/dev/null 2>&1 || {
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    }
+done
+
+if [ -f .env.proxmox ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env.proxmox
+    set +a
+fi
+for name in PROXMOX_HOST PROXMOX_USER PROXMOX_TOKEN_NAME PROXMOX_TOKEN_SECRET; do
+    eval "value=\${$name:-}"
+    [ -n "$value" ] || { printf 'Missing %s.\n' "$name" >&2; exit 2; }
+done
+
+case "$PROXMOX_HOST" in
+    http://*|https://*) base=${PROXMOX_HOST%/} ;;
+    *) base="https://${PROXMOX_HOST}:8006" ;;
+esac
+case "$base" in
+    */api2/json) ;;
+    *) base="$base/api2/json" ;;
+esac
+node=${PROXMOX_NODE:-Prox-PC}
+import_storage=${CARBIDEOS_PROXMOX_IMPORT_STORAGE:-carbide-import}
+disk_storage=${CARBIDEOS_PROXMOX_DISK_STORAGE:-local-lvm}
+auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
+vm="$base/nodes/$node/qemu/$vmid"
+
+api() {
+    method=$1
+    path=$2
+    shift 2
+    curl -kfsS -X "$method" -H "$auth" "$@" "$path"
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+# A compressed image has to be expanded before upload; the import storage
+# stores raw disks.
+case "$image" in
+    *.zst)
+        command -v zstd >/dev/null 2>&1 || {
+            printf '%s\n' 'Missing required command: zstd' >&2
+            exit 1
+        }
+        printf 'Decompressing %s\n' "$image"
+        zstd --long=31 --decompress --quiet --stdout "$image" >"$work/image.raw"
+        image="$work/image.raw"
+        ;;
+esac
+
+name=$(basename "$image")
+case "$name" in
+    *.raw) ;;
+    *) name="$name.raw" ;;
+esac
+volume="$import_storage:import/$name"
+
+current=$(api GET "$vm/config" | jq -r '.data.name // "?"')
+printf 'Reprovisioning VM %s (%s) on %s\n' "$vmid" "$current" "$node"
+printf '  image: %s\n' "$image"
+printf '  disk:  %s at %s\n' "$disk_storage" "$size"
+printf '\n%s\n' 'This destroys every disk currently attached to the VM.'
+if [ "$assume_yes" -eq 0 ]; then
+    printf 'Type the VM id to continue: '
+    read -r confirm
+    [ "$confirm" = "$vmid" ] || { printf '%s\n' 'Aborted.' >&2; exit 1; }
+fi
+
+status=$(api GET "$vm/status/current" | jq -r '.data.status')
+if [ "$status" != stopped ]; then
+    printf 'Stopping VM %s\n' "$vmid"
+    upid=$(api POST "$vm/status/stop" | jq -r '.data')
+    ./scripts/proxmox-wait-task "$upid" 120
+fi
+
+if api GET "$base/nodes/$node/storage/$import_storage/content" \
+    | jq -e --arg volid "$volume" '.data[]? | select(.volid == $volid)' \
+    >/dev/null 2>&1; then
+    printf 'Image already present: %s\n' "$volume"
+else
+    printf 'Uploading %s to %s\n' "$name" "$import_storage"
+    upid=$(curl -kfsS -H "$auth" \
+        -F content=import \
+        -F "filename=@$image;filename=$name" \
+        "$base/nodes/$node/storage/$import_storage/upload" | jq -r '.data')
+    ./scripts/proxmox-wait-task "$upid" 1800
+fi
+
+# Detaching leaves the volume behind as unusedN, so drop the attachments first
+# and then delete whatever they became.
+attached=$(api GET "$vm/config" \
+    | jq -r '.data | keys[] | select(test("^(scsi|virtio|sata|ide)[0-9]+$"))' \
+    | grep -v '^ide2$' || true)
+for disk in $attached; do
+    printf 'Detaching %s\n' "$disk"
+    api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
+done
+unused=$(api GET "$vm/config" \
+    | jq -r '.data | keys[] | select(test("^unused[0-9]+$"))' || true)
+for disk in $unused; do
+    printf 'Deleting %s\n' "$disk"
+    api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
+done
+
+printf 'Importing %s as scsi0\n' "$volume"
+upid=$(api POST "$vm/config" \
+    --data-urlencode \
+        "scsi0=$disk_storage:0,import-from=$volume,ssd=1,cache=writeback,iothread=1" \
+    | jq -r '.data // empty')
+[ -z "$upid" ] || ./scripts/proxmox-wait-task "$upid" 1800
+
+printf 'Resizing scsi0 to %s\n' "$size"
+api PUT "$vm/resize" --data-urlencode 'disk=scsi0' \
+    --data-urlencode "size=$size" >/dev/null
+
+api POST "$vm/config" --data-urlencode 'boot=order=scsi0' >/dev/null
+
+printf 'Starting VM %s\n' "$vmid"
+upid=$(api POST "$vm/status/start" | jq -r '.data')
+./scripts/proxmox-wait-task "$upid" 120
+
+# First boot runs repart and reboots once so the encrypted state and swap it
+# creates are discovered from the initrd, so allow for two boots.
+./scripts/proxmox-wait-ssh "$vmid" 600
