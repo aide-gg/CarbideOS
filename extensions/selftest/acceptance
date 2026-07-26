@@ -89,6 +89,8 @@ merged=$(systemd-sysext status --no-pager | grep -c selftest || true)
 check "$([ "$merged" -ge 1 ] && echo yes || echo no)" yes 'selftest is merged'
 raws=$(find "$extensions" -maxdepth 1 -name 'selftest*.raw' | wc -l)
 check "$raws" 1 'exactly one selftest image ends in .raw'
+leftover=$(find "$extensions" -maxdepth 1 -name 'selftest*.candidate' | wc -l)
+check "$leftover" 0 'no orphaned candidate image survives a failed activation'
 
 printf '\n== cleanup ==\n'
 carbide-agent unrequire selftest >/dev/null

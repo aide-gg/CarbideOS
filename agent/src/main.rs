@@ -191,9 +191,19 @@ fn recover(state: &mut State, name: &str, reason: &str) -> Result<(), String> {
         return Err(message);
     }
 
+    // Discard the candidate that caused this. Leaving it would be mildly
+    // useful for a post-mortem and considerably worse in aggregate: repeated
+    // failed activations would fill the state partition with images no longer
+    // reachable by anything. The reason is already recorded below.
+    let discarded = state.get(name).and_then(|e| e.candidate_version.clone());
+    if let Some(candidate) = discarded {
+        let _ = std::fs::remove_file(system::candidate_path(name, &candidate));
+    }
+
     let entry = state.entry(name);
     entry.phase = Phase::Recovered;
     entry.active_version = Some(version.clone());
+    entry.candidate_version = None;
     entry.last_health = Some("recovered".into());
     entry.last_failure = Some(reason.to_string());
     println!("{name}: recovered onto {version}");
