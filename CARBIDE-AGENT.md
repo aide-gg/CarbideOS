@@ -256,6 +256,11 @@ something disposable first. Its health probe fails whenever
 `/var/lib/carbide/selftest-unhealthy` exists, which makes "started but not
 actually working" reproducible at runtime without rebuilding.
 
+Proven so far by `extensions/selftest/acceptance` on 0.1.39, 16 checks passing:
+1, 4, 6, 10 and 12 below, plus the reset path and the guarantee that exactly
+one image ends in `.raw`. The rest remain open, and the power-loss cases in
+particular need deliberate interruption rather than a scripted run.
+
 1. Valid activation succeeds without a reboot.
 2. Extension with an invalid signature is refused before the active pointer
    moves.
