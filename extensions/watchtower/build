@@ -95,9 +95,9 @@ install -m 0644 "$watchtower_source/dist/run-carbide.mount" \
     "$root/usr/lib/systemd/system/run-carbide.mount"
 install -m 0644 "$watchtower_source/dist/ace-browser-smoke.service" \
     "$root/usr/lib/systemd/system/ace-browser-smoke.service"
-install -d "$root/usr/lib/systemd/system/multi-user.target.wants"
+install -d "$root/usr/lib/systemd/system/multi-user.target.upholds"
 ln -s ../watchtower.service \
-    "$root/usr/lib/systemd/system/multi-user.target.wants/watchtower.service"
+    "$root/usr/lib/systemd/system/multi-user.target.upholds/watchtower.service"
 install -m 0644 "$watchtower_source/dist/watchtower-carbideos.toml" \
     "$root/usr/lib/watchtower/config.toml"
 gpg --batch --yes --dearmor \
@@ -109,6 +109,7 @@ SYSEXT_LEVEL=1
 ARCHITECTURE=x86-64
 SYSEXT_ID=watchtower
 SYSEXT_VERSION_ID=$(sed -n 's/^version = "\(.*\)"/\1/p' "$watchtower_source/Cargo.toml" | head -1)
+EXTENSION_RELOAD_MANAGER=1
 EOF
 
 epoch=$(git -C "$watchtower_source" log -1 --format=%ct)
