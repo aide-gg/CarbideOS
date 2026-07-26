@@ -113,6 +113,28 @@ refused before any operand is processed if a target resolves inside `/`,
 `/boot`, `/efi`, `/etc`, or `/usr`; this also catches `rm -rf /*`. The guard
 has no supported override.
 
+## Disk Requirements
+
+First boot expands the image onto the backing disk with `systemd-repart`. The
+shipped ESP and A-slot set are fixed, and the inactive B slot is fixed, so a
+node reserves roughly 1.9 GiB before any writable partition exists.
+
+Signed extension images live on the encrypted state partition at
+`/var/lib/extensions`. Retaining an active image alongside its known-good
+predecessor is what makes extension rollback possible, so state carries a hard
+2 GiB floor and the largest growth weight.
+
+| Disk | Result |
+| --- | --- |
+| Under 5 GiB | Provisioning fails; state cannot meet its floor |
+| 5 GiB | Minimum. Watchtower only, no room for Chrome |
+| 16 GiB | Recommended fleet node with Chrome and job scratch |
+
+`systemd-repart` grows partitions into adjacent free space and never relocates
+an existing one. A node provisioned against an older, smaller layout therefore
+cannot be grown in place; enlarging its disk only offers space to the final
+partition. Reprovision instead.
+
 ## Base OS Updates
 
 First boot creates fixed-capacity `_empty` root, verity, and signature slots.
