@@ -199,6 +199,37 @@ Per supervised extension:
 Completed request ids are retained, bounded, so a replayed activation cannot
 silently invert a rollback.
 
+## Interface
+
+The binary ships at `/usr/bin/carbide-agent` inside the sealed base image.
+
+```
+carbide-agent health-gate              verify every required extension
+carbide-agent activate NAME VERSION    promote a staged candidate
+carbide-agent rollback NAME            return to the known-good image
+carbide-agent require NAME             record that this node must have NAME
+carbide-agent unrequire NAME           stop requiring NAME
+carbide-agent status                   report state as JSON
+```
+
+`activate` accepts an optional third argument, a request id. Repeating an id
+that has already completed is a no-op, so a replayed command cannot invert a
+rollback that happened in between.
+
+`require` is what provisioning calls to mark a node as belonging to a
+deployment. Until something is required, the agent gates nothing.
+
+`health-gate` is invoked by `carbide-agent-health.service`, which is ordered
+`Before=boot-complete.target` and installed `RequiredBy=boot-complete.target`.
+`systemd-bless-boot.service` carries `Requires=boot-complete.target`, so a
+failure here prevents the target being reached and the boot is never marked
+good. `RequiredBy` rather than `WantedBy` is what makes the failure propagate
+instead of merely being logged.
+
+systemd is driven through its command line tools rather than D-Bus. A bus
+client is a large dependency to carry inside the one component that has to keep
+working when everything else is broken.
+
 ## Acceptance
 
 The agent is not finished until each of these is demonstrated on a real node.

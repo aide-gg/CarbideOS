@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Verify required CarbideOS system extensions
+Documentation=man:systemd.special(7)
+# Extensions have to be merged and their units visible before anything can be
+# judged healthy. systemd-sysext.service runs before sysinit.target, so it has
+# long since completed by the time this runs.
+After=systemd-sysext.service local-fs.target
+# Ordered after networking without pulling it in. An extension whose health
+# probe needs the network arranges that through its own unit; the agent itself
+# must not assume any extension needs it.
+After=network-online.target
+RequiresMountsFor=/var/lib/extensions /var/lib/carbide
+ConditionPathExists=!/etc/initrd-release
+
+# systemd-bless-boot.service carries Requires=boot-complete.target, so failing
+# this check prevents the target being reached, the boot is never marked good,
+# and the counter runs down into an A/B rollback. RequiredBy in [Install] is
+# what makes a failure here propagate rather than merely be noted.
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/carbide-agent health-gate
+# Recovery deliberately takes time: it restarts a service, waits for readiness
+# and then soaks it. This bound only matters when something is already wrong.
+TimeoutStartSec=900
+
+[Install]
+RequiredBy=boot-complete.target

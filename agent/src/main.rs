@@ -1,0 +1,332 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! carbide-agent — CarbideOS system extension supervisor.
+//!
+//! Base OS updates get A/B slots and boot counting, so a bad image fails and
+//! firmware falls back. System extensions get none of that: a broken extension
+//! merges perfectly, the node comes up healthy, and whatever the extension
+//! provided is simply missing or crash-looping. This closes that gap.
+//!
+//! It is deliberately generic. It does not know what any extension does, holds
+//! no credentials, and opens no network connections. Recovery is a local
+//! switch between images already on disk, so it works on a node with no route
+//! to anywhere and no help from a provisioner.
+
+mod config;
+mod state;
+mod system;
+
+use std::process::ExitCode;
+
+use config::Ruleset;
+use state::{Phase, State};
+
+fn main() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let command = arguments.first().map(String::as_str).unwrap_or("help");
+
+    let result = match command {
+        "health-gate" => health_gate(),
+        "activate" => activate(&arguments[1..]),
+        "rollback" => rollback_command(&arguments[1..]),
+        "require" => set_required(&arguments[1..], true),
+        "unrequire" => set_required(&arguments[1..], false),
+        "status" => status(),
+        "help" | "--help" | "-h" => {
+            usage();
+            return ExitCode::SUCCESS;
+        }
+        other => Err(format!("unknown command {other:?}")),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("carbide-agent: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn usage() {
+    println!(
+        "\
+Usage: carbide-agent COMMAND
+
+  health-gate              Verify every required extension is healthy
+  activate NAME VERSION    Activate a staged candidate, reverting on failure
+  rollback NAME            Return an extension to its known-good image
+  require NAME             Record that this node must have NAME
+  unrequire NAME           Stop requiring NAME
+  status                   Report agent state as JSON
+
+Rulesets are read only from /usr/lib/carbide/health.d.
+Images live in /var/lib/extensions; only the active one ends in .raw."
+    );
+}
+
+/// Gate boot assessment on the node actually being able to do its job.
+///
+/// This runs before boot-complete.target, so failing it withholds the blessing
+/// and lets base A/B rollback take over. Extension-level recovery is attempted
+/// first, because extensions live on the state partition shared by both base
+/// slots — rolling back the base OS cannot restore an extension, so gating
+/// before recovery would trigger a rollback that could not possibly help.
+fn health_gate() -> Result<(), String> {
+    let mut state = State::load().map_err(|error| error.to_string())?;
+    let required = state.required();
+
+    if required.is_empty() {
+        println!("no required extensions; nothing to verify");
+        return Ok(());
+    }
+
+    let merged = system::merged_extensions().unwrap_or_default();
+    let mut failures = Vec::new();
+
+    for name in required {
+        match verify_or_recover(&mut state, &name, &merged) {
+            Ok(()) => println!("{name}: healthy"),
+            Err(reason) => {
+                eprintln!("{name}: {reason}");
+                failures.push(name);
+            }
+        }
+    }
+
+    state.store().map_err(|error| error.to_string())?;
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "required extensions unhealthy: {}",
+            failures.join(", ")
+        ))
+    }
+}
+
+fn verify_or_recover(state: &mut State, name: &str, merged: &[String]) -> Result<(), String> {
+    if state.get(name).is_some_and(|e| e.phase.is_terminal()) {
+        return Err("in a terminal state; not retrying automatically".into());
+    }
+
+    let ruleset = match Ruleset::load_named(name) {
+        Ok(ruleset) => ruleset,
+        Err(error) => {
+            // No ruleset means the extension is not merged, or shipped without
+            // one. Either way a required extension is not usable.
+            let reason = format!("no usable ruleset: {error}");
+            fail(state, name, &reason);
+            return Err(reason);
+        }
+    };
+
+    if !merged.is_empty() && !merged.iter().any(|m| m == name) {
+        let reason = "required extension is not merged".to_string();
+        return match recover(state, name, &ruleset, &reason) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+
+    if let Err(reason) = healthy_now(&ruleset) {
+        return recover(state, name, &ruleset, &reason);
+    }
+
+    let entry = state.entry(name);
+    entry.phase = Phase::Active;
+    entry.last_health = Some("healthy".into());
+    entry.last_failure = None;
+    Ok(())
+}
+
+fn healthy_now(ruleset: &Ruleset) -> Result<(), String> {
+    system::wait_until_ready(ruleset)?;
+    system::probe(ruleset)
+}
+
+/// Restore the retained known-good image and confirm it works.
+fn recover(state: &mut State, name: &str, ruleset: &Ruleset, reason: &str) -> Result<(), String> {
+    let known_good = state.get(name).and_then(|e| e.known_good_version.clone());
+
+    let Some(version) = known_good else {
+        let message = format!("{reason}; no known-good image to fall back to");
+        fail(state, name, &message);
+        return Err(message);
+    };
+
+    let image = system::rollback_path(name, &version);
+    if !image.exists() {
+        let message = format!("{reason}; known-good image {version} is missing");
+        fail(state, name, &message);
+        return Err(message);
+    }
+
+    eprintln!("{name}: {reason}; reverting to {version}");
+    state.entry(name).phase = Phase::Reverting;
+    let _ = state.store();
+
+    let _ = system::stop_unit(&ruleset.unit);
+    system::install_active(&image, name).map_err(|error| error.to_string())?;
+    system::sysext_refresh().map_err(|error| error.to_string())?;
+    let _ = system::daemon_reload();
+
+    if let Err(error) = healthy_now(ruleset) {
+        let message = format!("{reason}; known-good {version} also failed: {error}");
+        fail(state, name, &message);
+        return Err(message);
+    }
+
+    let entry = state.entry(name);
+    entry.phase = Phase::Recovered;
+    entry.active_version = Some(version.clone());
+    entry.last_health = Some("recovered".into());
+    entry.last_failure = Some(reason.to_string());
+    println!("{name}: recovered onto {version}");
+    Ok(())
+}
+
+fn fail(state: &mut State, name: &str, reason: &str) {
+    let entry = state.entry(name);
+    entry.phase = Phase::Unrecoverable;
+    entry.last_failure = Some(reason.to_string());
+    entry.last_health = None;
+}
+
+/// Promote a staged candidate, reverting if it does not prove itself.
+fn activate(arguments: &[String]) -> Result<(), String> {
+    let name = arguments
+        .first()
+        .ok_or("usage: carbide-agent activate NAME VERSION")?;
+    let version = arguments
+        .get(1)
+        .ok_or("usage: carbide-agent activate NAME VERSION")?;
+    let request_id = arguments.get(2).cloned();
+
+    let mut state = State::load().map_err(|error| error.to_string())?;
+
+    if let (Some(id), Some(entry)) = (request_id.as_ref(), state.get(name))
+        && entry.already_completed(id)
+    {
+        println!("{name}: request {id} already applied");
+        return Ok(());
+    }
+
+    let candidate = system::candidate_path(name, version);
+    if !candidate.exists() {
+        return Err(format!("no staged candidate at {}", candidate.display()));
+    }
+
+    let candidate_size = std::fs::metadata(&candidate)
+        .map_err(|error| error.to_string())?
+        .len();
+    let available = system::available_bytes().map_err(|error| error.to_string())?;
+    if available < candidate_size {
+        return Err(format!(
+            "insufficient space: candidate needs {candidate_size} bytes, {available} available"
+        ));
+    }
+
+    let ruleset = Ruleset::load_named(name).map_err(|error| error.to_string())?;
+    let previous = state.get(name).and_then(|e| e.active_version.clone());
+
+    // Retain the outgoing image before overwriting it, so there is always
+    // something to fall back to even if the machine dies mid-activation.
+    if let Some(previous_version) = &previous {
+        let active = system::active_path(name);
+        let retained = system::rollback_path(name, previous_version);
+        if active.exists() && !retained.exists() {
+            std::fs::copy(&active, &retained).map_err(|error| error.to_string())?;
+        }
+    }
+
+    {
+        let entry = state.entry(name);
+        entry.candidate_version = Some(version.clone());
+        entry.request_id = request_id.clone();
+        entry.phase = Phase::Activating;
+        if let Some(previous_version) = &previous {
+            entry.known_good_version = Some(previous_version.clone());
+        }
+    }
+    state.store().map_err(|error| error.to_string())?;
+
+    let _ = system::stop_unit(&ruleset.unit);
+    system::install_active(&candidate, name).map_err(|error| error.to_string())?;
+    system::sysext_refresh().map_err(|error| error.to_string())?;
+    let _ = system::daemon_reload();
+
+    state.entry(name).phase = Phase::Starting;
+    let _ = state.store();
+
+    let outcome = system::wait_until_ready(&ruleset).and_then(|()| {
+        state.entry(name).phase = Phase::Soaking;
+        let _ = state.store();
+        system::soak(&ruleset)
+    });
+
+    if let Err(reason) = outcome {
+        let result = recover(&mut state, name, &ruleset, &reason);
+        state.store().map_err(|error| error.to_string())?;
+        return match result {
+            Ok(()) => Err(format!("{name}: {reason}; reverted")),
+            Err(error) => Err(error),
+        };
+    }
+
+    {
+        let entry = state.entry(name);
+        entry.phase = Phase::Active;
+        entry.active_version = Some(version.clone());
+        entry.candidate_version = None;
+        entry.last_health = Some("healthy".into());
+        entry.last_failure = None;
+        entry.required = true;
+        if let Some(id) = &request_id {
+            entry.record_completed(id);
+        }
+    }
+    state.store().map_err(|error| error.to_string())?;
+
+    // The candidate has proven itself, so it becomes the image to fall back to
+    // next time and the staged copy is no longer needed.
+    let _ = std::fs::remove_file(&candidate);
+    println!("{name}: active on {version}");
+    Ok(())
+}
+
+fn rollback_command(arguments: &[String]) -> Result<(), String> {
+    let name = arguments
+        .first()
+        .ok_or("usage: carbide-agent rollback NAME")?;
+    let ruleset = Ruleset::load_named(name).map_err(|error| error.to_string())?;
+    let mut state = State::load().map_err(|error| error.to_string())?;
+    let result = recover(&mut state, name, &ruleset, "operator requested rollback");
+    state.store().map_err(|error| error.to_string())?;
+    result
+}
+
+fn set_required(arguments: &[String], required: bool) -> Result<(), String> {
+    let name = arguments
+        .first()
+        .ok_or("usage: carbide-agent require|unrequire NAME")?;
+    let mut state = State::load().map_err(|error| error.to_string())?;
+    state.entry(name).required = required;
+    state.store().map_err(|error| error.to_string())?;
+    println!(
+        "{name}: {}",
+        if required {
+            "required"
+        } else {
+            "no longer required"
+        }
+    );
+    Ok(())
+}
+
+fn status() -> Result<(), String> {
+    let state = State::load().map_err(|error| error.to_string())?;
+    let encoded = serde_json::to_string_pretty(&state).map_err(|error| error.to_string())?;
+    println!("{encoded}");
+    Ok(())
+}

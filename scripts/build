@@ -111,17 +111,44 @@ if [ "$variant" != fleet ] && [ "$variant" != playground ] && \
     exit 1
 fi
 
+# carbide-agent is compiled on the host and installed into the image further
+# down. Resolve cargo before elevating, because root's PATH will not include a
+# per-user Rust toolchain.
+if [ -z "${CARGO:-}" ]; then
+    CARGO=$(command -v cargo 2>/dev/null || true)
+    if [ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+        CARGO="$HOME/.cargo/bin/cargo"
+    fi
+fi
+if [ -z "${CARGO:-}" ] || [ ! -x "$CARGO" ]; then
+    printf '%s\n' 'Missing cargo; required to build carbide-agent.' >&2
+    exit 1
+fi
+export CARGO
+
+agent_binary=agent/target/release/carbide-agent
+
 if [ "$(id -u)" -ne 0 ]; then
     if ! command -v sudo >/dev/null 2>&1; then
         printf '%s\n' 'Building an enforcing SELinux image requires root.' >&2
         exit 1
     fi
+    # Compile before elevating. A rustup-managed toolchain resolves through a
+    # shim that reads the invoking user's configuration, which root does not
+    # have, and building as root would leave root-owned artifacts behind.
+    "$CARGO" build --release --locked --manifest-path agent/Cargo.toml
     printf '%s\n' 'Elevating mkosi so Fedora SELinux labels can be applied.'
     if [ -n "${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}" ]; then
-        exec sudo --preserve-env=CARBIDEOS_SIGNING_KEY_PASSPHRASE \
+        exec sudo --preserve-env=CARGO,CARBIDEOS_SIGNING_KEY_PASSPHRASE \
             "$PWD/scripts/build" "$@"
     fi
-    exec sudo "$PWD/scripts/build" "$@"
+    exec sudo --preserve-env=CARGO "$PWD/scripts/build" "$@"
+fi
+
+# Reached only as root. The build above normally supplies this; invoking the
+# script directly as root is the exception rather than the path.
+if [ ! -x "$agent_binary" ]; then
+    "$CARGO" build --release --locked --manifest-path agent/Cargo.toml
 fi
 
 # Replace only CarbideOS artifacts. Keep mkosi.output/tools so the large Debian
@@ -160,6 +187,10 @@ if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
     verity_key="$private_work/verity.key"
     unset CARBIDEOS_SIGNING_KEY_PASSPHRASE passphrase
 fi
+# carbide-agent ships inside the sealed image, so it is covered by A/B rollback
+# and survives whatever happens to a system extension.
+install -D -m 0755 "$agent_binary" "$extra/usr/bin/carbide-agent"
+
 install -d -m 0755 "$extra/usr/lib/carbideos/authorized_keys"
 if [ "$variant" != playground ]; then
     install -m 0644 keys/admin/ace-mgmt.pub \
