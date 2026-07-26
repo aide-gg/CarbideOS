@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         "rollback" => rollback_command(&arguments[1..]),
         "require" => set_required(&arguments[1..], true),
         "unrequire" => set_required(&arguments[1..], false),
+        "reset" => reset(&arguments[1..]),
         "status" => status(),
         "help" | "--help" | "-h" => {
             usage();
@@ -57,6 +58,7 @@ Usage: carbide-agent COMMAND
   rollback NAME            Return an extension to its known-good image
   require NAME             Record that this node must have NAME
   unrequire NAME           Stop requiring NAME
+  reset NAME               Clear a terminal state so NAME is checked again
   status                   Report agent state as JSON
 
 Rulesets are read only from /usr/lib/carbide/health.d.
@@ -122,15 +124,11 @@ fn verify_or_recover(state: &mut State, name: &str, merged: &[String]) -> Result
     };
 
     if !merged.is_empty() && !merged.iter().any(|m| m == name) {
-        let reason = "required extension is not merged".to_string();
-        return match recover(state, name, &ruleset, &reason) {
-            Ok(()) => Ok(()),
-            Err(error) => Err(error),
-        };
+        return recover(state, name, "required extension is not merged");
     }
 
     if let Err(reason) = healthy_now(&ruleset) {
-        return recover(state, name, &ruleset, &reason);
+        return recover(state, name, &reason);
     }
 
     let entry = state.entry(name);
@@ -146,7 +144,7 @@ fn healthy_now(ruleset: &Ruleset) -> Result<(), String> {
 }
 
 /// Restore the retained known-good image and confirm it works.
-fn recover(state: &mut State, name: &str, ruleset: &Ruleset, reason: &str) -> Result<(), String> {
+fn recover(state: &mut State, name: &str, reason: &str) -> Result<(), String> {
     let known_good = state.get(name).and_then(|e| e.known_good_version.clone());
 
     let Some(version) = known_good else {
@@ -166,12 +164,28 @@ fn recover(state: &mut State, name: &str, ruleset: &Ruleset, reason: &str) -> Re
     state.entry(name).phase = Phase::Reverting;
     let _ = state.store();
 
-    let _ = system::stop_unit(&ruleset.unit);
+    // Stop whatever the currently merged image declares, if it declares
+    // anything. A candidate that failed to merge leaves nothing to stop.
+    if let Ok(current) = Ruleset::load_named(name) {
+        let _ = system::stop_unit(&current.unit);
+    }
+
     system::install_active(&image, name).map_err(|error| error.to_string())?;
     system::sysext_refresh().map_err(|error| error.to_string())?;
     let _ = system::daemon_reload();
 
-    if let Err(error) = healthy_now(ruleset) {
+    // Read the ruleset only now. It arrives with the image, so this is the
+    // restored version's own ruleset rather than the failed candidate's.
+    let ruleset = match Ruleset::load_named(name) {
+        Ok(ruleset) => ruleset,
+        Err(error) => {
+            let message = format!("{reason}; restored {version} has no usable ruleset: {error}");
+            fail(state, name, &message);
+            return Err(message);
+        }
+    };
+
+    if let Err(error) = healthy_now(&ruleset) {
         let message = format!("{reason}; known-good {version} also failed: {error}");
         fail(state, name, &message);
         return Err(message);
@@ -227,7 +241,6 @@ fn activate(arguments: &[String]) -> Result<(), String> {
         ));
     }
 
-    let ruleset = Ruleset::load_named(name).map_err(|error| error.to_string())?;
     let previous = state.get(name).and_then(|e| e.active_version.clone());
 
     // Retain the outgoing image before overwriting it, so there is always
@@ -251,22 +264,32 @@ fn activate(arguments: &[String]) -> Result<(), String> {
     }
     state.store().map_err(|error| error.to_string())?;
 
-    let _ = system::stop_unit(&ruleset.unit);
+    // Stop what the outgoing image declared, if anything is merged yet.
+    if let Ok(current) = Ruleset::load_named(name) {
+        let _ = system::stop_unit(&current.unit);
+    }
     system::install_active(&candidate, name).map_err(|error| error.to_string())?;
     system::sysext_refresh().map_err(|error| error.to_string())?;
     let _ = system::daemon_reload();
 
-    state.entry(name).phase = Phase::Starting;
-    let _ = state.store();
-
-    let outcome = system::wait_until_ready(&ruleset).and_then(|()| {
-        state.entry(name).phase = Phase::Soaking;
-        let _ = state.store();
-        system::soak(&ruleset)
-    });
+    // The ruleset ships inside the extension, so it only exists once the
+    // candidate has merged. A first activation has nothing to read before this
+    // point, and a candidate that fails to merge supplies nothing at all.
+    let outcome = match Ruleset::load_named(name) {
+        Ok(ruleset) => {
+            state.entry(name).phase = Phase::Starting;
+            let _ = state.store();
+            system::wait_until_ready(&ruleset).and_then(|()| {
+                state.entry(name).phase = Phase::Soaking;
+                let _ = state.store();
+                system::soak(&ruleset)
+            })
+        }
+        Err(error) => Err(format!("candidate supplied no usable ruleset: {error}")),
+    };
 
     if let Err(reason) = outcome {
-        let result = recover(&mut state, name, &ruleset, &reason);
+        let result = recover(&mut state, name, &reason);
         state.store().map_err(|error| error.to_string())?;
         return match result {
             Ok(()) => Err(format!("{name}: {reason}; reverted")),
@@ -299,9 +322,8 @@ fn rollback_command(arguments: &[String]) -> Result<(), String> {
     let name = arguments
         .first()
         .ok_or("usage: carbide-agent rollback NAME")?;
-    let ruleset = Ruleset::load_named(name).map_err(|error| error.to_string())?;
     let mut state = State::load().map_err(|error| error.to_string())?;
-    let result = recover(&mut state, name, &ruleset, "operator requested rollback");
+    let result = recover(&mut state, name, "operator requested rollback");
     state.store().map_err(|error| error.to_string())?;
     result
 }
@@ -321,6 +343,25 @@ fn set_required(arguments: &[String], required: bool) -> Result<(), String> {
             "no longer required"
         }
     );
+    Ok(())
+}
+
+/// Return an extension to a checkable state.
+///
+/// The agent deliberately stops rather than looping once it reaches a terminal
+/// state, so an operator who has fixed the underlying cause needs a way to say
+/// so. Without this, the only route back is editing the state file by hand.
+fn reset(arguments: &[String]) -> Result<(), String> {
+    let name = arguments.first().ok_or("usage: carbide-agent reset NAME")?;
+    let mut state = State::load().map_err(|error| error.to_string())?;
+    {
+        let entry = state.entry(name);
+        entry.phase = Phase::Idle;
+        entry.last_failure = None;
+        entry.last_health = None;
+    }
+    state.store().map_err(|error| error.to_string())?;
+    println!("{name}: reset; will be checked again");
     Ok(())
 }
 

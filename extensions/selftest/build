@@ -1,0 +1,158 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Builds a signed system extension that exists purely to exercise
+# carbide-agent. It carries no payload beyond a trivial unit and the ruleset
+# describing how to judge it.
+#
+# SPEC.MD makes recovering from a deliberately broken extension a release gate.
+# Proving that with the real payload requires working fleet credentials and
+# risks the node that carries them, so the mechanism is proven here first with
+# something disposable.
+#
+#   ./extensions/selftest/build healthy 1
+#   ./extensions/selftest/build broken  2
+#
+# "healthy" comes up and stays up. "broken" fails to start, which is what the
+# agent has to notice and undo.
+set -eu
+umask 022
+
+cd "$(dirname "$0")/../.."
+
+behaviour=${1:-healthy}
+revision=${2:-1}
+case "$behaviour" in
+    healthy|broken) ;;
+    *)
+        printf 'Usage: %s [healthy|broken] [REVISION]\n' "$0" >&2
+        exit 2
+        ;;
+esac
+
+version=${CARBIDEOS_EXTENSION_VERSION:-$(tr -d '[:space:]' <mkosi.version)}
+signing_key=keys/secureboot/secure-boot.key
+signing_cert=keys/secureboot/secure-boot.crt
+output="$PWD/dist/extensions/selftest"
+
+for command in mkfs.erofs openssl systemd-repart; do
+    command -v "$command" >/dev/null 2>&1 || {
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    }
+done
+for file in "$signing_key" "$signing_cert"; do
+    [ -s "$file" ] || { printf 'Missing %s\n' "$file" >&2; exit 1; }
+done
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+root="$work/root"
+install -d \
+    "$root/usr/libexec" \
+    "$root/usr/lib/systemd/system" \
+    "$root/usr/lib/carbide/health.d" \
+    "$root/usr/lib/extension-release.d" \
+    "$output"
+
+if [ "$behaviour" = healthy ]; then
+    start_command=/usr/bin/true
+else
+    start_command=/usr/bin/false
+fi
+
+cat >"$root/usr/lib/systemd/system/carbide-selftest.service" <<EOF
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Unit]
+Description=CarbideOS extension self-test ($behaviour revision $revision)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$start_command
+
+[Install]
+UpheldBy=multi-user.target
+EOF
+
+# Reads a marker under /var so the probe can be made to fail at runtime without
+# rebuilding, which is how "started but not actually working" gets tested. The
+# script itself still lives on the verity-backed path the agent requires.
+cat >"$root/usr/libexec/carbide-selftest-health" <<'EOF'
+#!/bin/sh
+set -eu
+if [ -e /var/lib/carbide/selftest-unhealthy ]; then
+    printf '%s\n' 'self-test marked unhealthy' >&2
+    exit 1
+fi
+exit 0
+EOF
+chmod 0755 "$root/usr/libexec/carbide-selftest-health"
+
+# Deliberately short timings. This extension exists to be cycled repeatedly,
+# not to model a real service's startup.
+cat >"$root/usr/lib/carbide/health.d/selftest.conf" <<'EOF'
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Extension]
+Unit=carbide-selftest.service
+ReadyTimeoutSec=15
+StartAttempts=2
+HealthCommand=/usr/libexec/carbide-selftest-health
+HealthIntervalSec=2
+HealthTimeoutSec=5
+SoakSec=6
+EOF
+
+cat >"$root/usr/lib/extension-release.d/extension-release.selftest" <<EOF
+ID=carbideos
+VERSION_ID=$version
+SYSEXT_LEVEL=1
+ARCHITECTURE=x86-64
+SYSEXT_ID=selftest
+SYSEXT_VERSION_ID=$revision
+EXTENSION_RELOAD_MANAGER=1
+EOF
+
+epoch=$(date +%s)
+find "$root" -exec touch -h -d "@$epoch" {} +
+mkfs.erofs --quiet --all-root -T "$epoch" \
+    -L selftest -zlz4hc,level=12 \
+    --file-contexts=extensions/selftest/file-contexts \
+    "$work/root.erofs" "$root"
+
+definitions="$work/repart.d"
+install -d "$definitions"
+cat >"$definitions/10-root.conf" <<EOF
+[Partition]
+Type=root
+CopyBlocks=$work/root.erofs
+Verity=data
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/20-root-verity.conf" <<EOF
+[Partition]
+Type=root-verity
+Verity=hash
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+cat >"$definitions/30-root-verity-sig.conf" <<EOF
+[Partition]
+Type=root-verity-sig
+Verity=signature
+VerityMatchKey=root
+ReadOnly=yes
+EOF
+
+image="$output/selftest-$behaviour-$revision.raw"
+rm -f "$image"
+systemd-repart --empty=create --size=32M \
+    --seed=4d0f8f2e-6f1a-4a4b-9c33-3f0f4a7c9b21 \
+    --definitions="$definitions" \
+    --private-key="$signing_key" \
+    --certificate="$signing_cert" \
+    "$image" >/dev/null
+
+printf 'Built %s self-test extension revision %s for CarbideOS %s: %s\n' \
+    "$behaviour" "$revision" "$version" "$image"

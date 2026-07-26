@@ -1,0 +1,102 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Runs the carbide-agent acceptance cases against the disposable self-test
+# extension. Executed as root on the node under test, with the two self-test
+# images already staged in a directory passed as the first argument.
+#
+# Leaves the node clean: the extension is unrequired and its images removed.
+set -eu
+
+extensions=/var/lib/extensions
+staging=${1:-/var/tmp}
+marker=/var/lib/carbide/selftest-unhealthy
+pass=0
+fail=0
+
+last_output=
+
+# Runs a command, recording its output so a failing check can explain itself
+# rather than leaving the reader to guess.
+attempt() {
+    if last_output=$("$@" 2>&1); then
+        result=ok
+    else
+        result=failed
+    fi
+}
+
+check() {
+    if [ "$1" = "$2" ]; then
+        printf '  PASS  %s\n' "$3"
+        pass=$((pass + 1))
+    else
+        printf '  FAIL  %s (expected %s, got %s)\n' "$3" "$2" "$1"
+        [ -n "$last_output" ] && printf '        %s\n' "$last_output"
+        fail=$((fail + 1))
+    fi
+}
+
+phase() {
+    carbide-agent status | sed -n 's/.*"phase": "\([a-z]*\)".*/\1/p' | head -1
+}
+
+active_version() {
+    carbide-agent status | sed -n 's/.*"active_version": "\([^"]*\)".*/\1/p' | head -1
+}
+
+printf '\n== 1. activate a healthy extension ==\n'
+cp "$staging/selftest-healthy-1.raw" "$extensions/selftest.raw.1.candidate"
+attempt carbide-agent activate selftest 1
+check "$result" ok 'healthy candidate activates'
+check "$(phase)" active 'phase is active'
+check "$(active_version)" 1 'active on revision 1'
+check "$(systemctl is-active carbide-selftest.service)" active 'unit is running'
+
+printf '\n== 2. a required extension is gated ==\n'
+attempt carbide-agent health-gate
+check "$result" ok 'gate passes while healthy'
+
+printf '\n== 3. deliberately broken extension is undone ==\n'
+cp "$staging/selftest-broken-2.raw" "$extensions/selftest.raw.2.candidate"
+attempt carbide-agent activate selftest 2
+check "$result" failed 'broken candidate is rejected'
+check "$(phase)" recovered 'phase is recovered'
+check "$(active_version)" 1 'reverted to revision 1'
+check "$(systemctl is-active carbide-selftest.service)" active 'unit running again after revert'
+
+printf '\n== 4. started but not actually working ==\n'
+install -d /var/lib/carbide
+touch "$marker"
+attempt carbide-agent health-gate
+check "$result" failed 'probe failure caught despite the unit being active'
+check "$(phase)" unrecoverable 'terminal when the fallback fails too'
+
+printf '\n== 5. terminal state is not retried ==\n'
+last_output=$(carbide-agent health-gate 2>&1 || true)
+printf '%s' "$last_output" | grep -q terminal && result=ok || result=failed
+check "$result" ok 'gate refuses to retry a terminal extension'
+
+printf '\n== 6. operator recovery ==\n'
+rm -f "$marker"
+carbide-agent reset selftest >/dev/null
+attempt carbide-agent health-gate
+check "$result" ok 'healthy again after reset'
+check "$(phase)" active 'phase back to active'
+
+printf '\n== 7. only the active image is merged ==\n'
+merged=$(systemd-sysext status --no-pager | grep -c selftest || true)
+check "$([ "$merged" -ge 1 ] && echo yes || echo no)" yes 'selftest is merged'
+raws=$(find "$extensions" -maxdepth 1 -name 'selftest*.raw' | wc -l)
+check "$raws" 1 'exactly one selftest image ends in .raw'
+
+printf '\n== cleanup ==\n'
+carbide-agent unrequire selftest >/dev/null
+rm -f "$extensions"/selftest.raw "$extensions"/selftest.raw.*
+systemd-sysext --image-policy=root=verity+signed+absent:usr=verity+signed+absent \
+    refresh >/dev/null 2>&1 || true
+rm -f "$marker"
+printf 'removed self-test images and refreshed\n'
+
+printf '\n== result: %s passed, %s failed ==\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

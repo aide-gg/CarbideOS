@@ -209,8 +209,13 @@ carbide-agent activate NAME VERSION    promote a staged candidate
 carbide-agent rollback NAME            return to the known-good image
 carbide-agent require NAME             record that this node must have NAME
 carbide-agent unrequire NAME           stop requiring NAME
+carbide-agent reset NAME               clear a terminal state
 carbide-agent status                   report state as JSON
 ```
+
+`reset` exists because the agent deliberately stops rather than looping once it
+reaches `unrecoverable`. An operator who has fixed the underlying cause needs a
+way to say so; without it the only route back is editing state by hand.
 
 `activate` accepts an optional third argument, a request id. Repeating an id
 that has already completed is a no-op, so a replayed command cannot invert a
@@ -235,6 +240,21 @@ working when everything else is broken.
 The agent is not finished until each of these is demonstrated on a real node.
 SPEC.MD §13 makes the deliberately broken extension a release gate: if it does
 not recover itself, nothing ships.
+
+`extensions/selftest/build` produces a disposable signed extension for exactly
+this. It carries no payload beyond a trivial unit and its ruleset, and builds
+in two behaviours:
+
+```bash
+./extensions/selftest/build healthy 1
+./extensions/selftest/build broken  2
+```
+
+Proving recovery with the real payload would require working fleet credentials
+and would risk the node carrying them, so the mechanism is proven against
+something disposable first. Its health probe fails whenever
+`/var/lib/carbide/selftest-unhealthy` exists, which makes "started but not
+actually working" reproducible at runtime without rebuilding.
 
 1. Valid activation succeeds without a reboot.
 2. Extension with an invalid signature is refused before the active pointer
