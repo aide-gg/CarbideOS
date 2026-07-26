@@ -142,6 +142,19 @@ else
     ./scripts/proxmox-wait-task "$upid" 1800
 fi
 
+# A snapshot pins the volumes it was taken against, so the old disks cannot be
+# removed while one exists. They describe the machine that is being discarded.
+attempt=0
+while [ "$attempt" -lt 32 ]; do
+    attempt=$((attempt + 1))
+    snapshot=$(api GET "$vm/snapshot" \
+        | jq -r '[.data[] | select(.name != "current") | .name] | first // empty')
+    [ -n "$snapshot" ] || break
+    printf 'Deleting snapshot %s\n' "$snapshot"
+    upid=$(api DELETE "$vm/snapshot/$snapshot" | jq -r '.data')
+    ./scripts/proxmox-wait-task "$upid" 600
+done
+
 # Detaching leaves the volume behind as unusedN, so drop the attachments first
 # and then delete whatever they became.
 attached=$(api GET "$vm/config" \
@@ -151,9 +164,15 @@ for disk in $attached; do
     printf 'Detaching %s\n' "$disk"
     api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
 done
-unused=$(api GET "$vm/config" \
-    | jq -r '.data | keys[] | select(test("^unused[0-9]+$"))' || true)
-for disk in $unused; do
+# Proxmox renumbers the unused entries after each removal, so a list captured
+# up front goes stale as soon as the first one is deleted. Re-read the config
+# and always remove the lowest remaining entry.
+attempt=0
+while [ "$attempt" -lt 32 ]; do
+    attempt=$((attempt + 1))
+    disk=$(api GET "$vm/config" \
+        | jq -r '[.data | keys[] | select(test("^unused[0-9]+$"))] | sort | first // empty')
+    [ -n "$disk" ] || break
     printf 'Deleting %s\n' "$disk"
     api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
 done
