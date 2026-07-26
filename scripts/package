@@ -62,6 +62,34 @@ fi
 
 rm -rf "$release"
 mkdir -p "$release"
+
+# Release bundles are around 600MB each and nothing reads an old one once it
+# has been published, but only the current version's directory was ever
+# removed, so they accumulated indefinitely. That is how a build first failed:
+# the host had filled its root filesystem with twenty-eight of them.
+release_retention=${CARBIDEOS_RELEASE_RETENTION:-2}
+case "$release_retention" in
+    ''|*[!0-9]*)
+        printf 'Invalid CARBIDEOS_RELEASE_RETENTION: %s\n' "$release_retention" >&2
+        exit 2
+        ;;
+esac
+if [ "$release_retention" -lt 1 ]; then
+    printf '%s\n' 'CARBIDEOS_RELEASE_RETENTION must be at least 1.' >&2
+    exit 2
+fi
+release_parent=$(dirname "$release")
+find "$release_parent" -maxdepth 1 -type d -name 'carbideos-*' -printf '%P\n' \
+    | sed 's/^carbideos-//' \
+    | grep -vx "$version" \
+    | LC_ALL=C sort -V -r \
+    | tail -n +"$release_retention" \
+    | while IFS= read -r stale; do
+        [ -n "$stale" ] || continue
+        printf 'Retiring release bundle %s\n' "$stale"
+        rm -rf "${release_parent:?}/carbideos-${stale:?}"
+    done
+
 mkdir -p "$update_feed"
 
 # scripts/sign hashes whatever the feed retains, so the manifest determines
