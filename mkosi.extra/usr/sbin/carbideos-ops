@@ -263,13 +263,12 @@ case "$operation" in
         fi
         /usr/bin/chmod 0644 "$staging"
         /usr/bin/mv -f "$staging" "$target"
-        # An unscoped image predates scoping. It merges into whatever base it
-        # was built for, so leaving one that targets the same base as this
-        # image would merge two copies of the extension at once.
-        legacy="/var/lib/extensions/$1.raw"
-        if [ -f "$legacy" ] && [ "$(image_base_version "$legacy")" = "$image_version" ]; then
-            /usr/bin/rm -f "$legacy"
-        fi
+        # An unscoped image predates scoping and is always superseded by this
+        # one, whatever base it was built for. Removing it only on a version
+        # match was not enough: an older image that still declares SYSEXT_LEVEL
+        # matches any base that also declares one, so it merged alongside the
+        # scoped image and the node ran two copies of the same extension.
+        /usr/bin/rm -f "/var/lib/extensions/$1.raw"
         # An image built for a base that is not running is staged, not broken:
         # it merges when that base boots. Only an image for the running base is
         # expected to merge now.

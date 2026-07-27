@@ -25,7 +25,20 @@ if [ "$#" -gt 1 ]; then
     printf 'Usage: %s [--debug|--fleet|--playground]\n' "$0" >&2
     exit 2
 fi
-version=$(tr -d '[:space:]' <mkosi.version)
+# mkosi.version is a file in the working tree, so a build takes whatever it
+# says at the moment it starts. Two builds run in parallel, or one started
+# while the file is being bumped for another, silently produce an image
+# stamped with someone else's version: a fleet build once came out as 0.1.46
+# because a development version was mid-flight. Naming the version explicitly
+# makes a build independent of the tree's current state.
+version=${CARBIDEOS_VERSION:-$(tr -d '[:space:]' <mkosi.version)}
+case "$version" in
+    '' | *[!A-Za-z0-9._-]*)
+        printf 'Refusing to build version %s\n' "$version" >&2
+        exit 1
+        ;;
+esac
+printf 'Building CarbideOS %s (%s)\n' "$version" "$variant"
 
 case "$variant" in
     fleet)
@@ -244,7 +257,7 @@ fi
 
 if [ "$variant" = debug ]; then
     printf '%s\n' 'Building CarbideOS debug image with root password enabled.'
-    mkosi --extra-tree="$extra" \
+    mkosi --extra-tree="$extra" --image-version="$version" \
         --output=carbideos-debug --hostname=carbideos-debug \
         --unified-kernel-image-format="carbideos-debug_${version}" \
         --environment=CARBIDEOS_VARIANT=debug build
@@ -266,7 +279,7 @@ fi
 
 if [ "$variant" = fleet ]; then
     printf '%s\n' 'Building CarbideOS fleet image with production trust.'
-    mkosi --extra-tree="$extra" \
+    mkosi --extra-tree="$extra" --image-version="$version" \
         --output="$output" --image-id=carbideos-fleet --hostname=carbideos \
         --unified-kernel-image-format="carbideos-fleet_${version}" \
         --environment=CARBIDEOS_VARIANT=fleet \
@@ -276,7 +289,7 @@ if [ "$variant" = fleet ]; then
         --verity-certificate="$verity_cert" build
 elif [ "$variant" = playground ]; then
     printf '%s\n' 'Building CarbideOS Playground image with isolated trust.'
-    mkosi --extra-tree="$extra" \
+    mkosi --extra-tree="$extra" --image-version="$version" \
         --output="$output" --image-id=carbideos-playground \
         --hostname=carbideos-playground \
         --unified-kernel-image-format="carbideos-playground_${version}" \
@@ -286,7 +299,7 @@ elif [ "$variant" = playground ]; then
         --verity-key="$verity_key" \
         --verity-certificate="$verity_cert" build
 else
-    mkosi --extra-tree="$extra" \
+    mkosi --extra-tree="$extra" --image-version="$version" \
         --unified-kernel-image-format="carbideos_${version}" \
         --environment=CARBIDEOS_VARIANT=development build
 fi
