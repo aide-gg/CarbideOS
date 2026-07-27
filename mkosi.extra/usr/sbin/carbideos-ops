@@ -222,7 +222,15 @@ case "$operation" in
         }
         policy=root=verity+signed+absent:usr=verity+signed+absent
         /usr/bin/install -d -m 0755 /var/lib/extensions
-        staging="/var/lib/extensions/.$1.staging"
+        # Staged outside the extensions directory and under a .raw name.
+        # systemd-dissect decides how to read a file from its suffix and
+        # reports nothing at all for one it does not recognise, so the version
+        # cannot be read from a file named .staging. A .raw file cannot be
+        # staged in the extensions directory either, because systemd-sysext
+        # merges every one of those. Same filesystem, so the move below is a
+        # rename rather than a second copy of a very large file.
+        /usr/bin/install -d -m 0700 /var/lib/carbide/staging
+        staging="/var/lib/carbide/staging/$1.raw"
         /usr/bin/head -c 1073741824 >"$staging"
         [ -s "$staging" ] || {
             /usr/bin/rm -f "$staging"
@@ -240,6 +248,7 @@ case "$operation" in
             printf 'Extension %s declares no usable base version\n' "$1" >&2
             exit 1
         fi
+        trap '/usr/bin/rm -f "$staging"' EXIT HUP INT TERM
         running=$(running_base_version)
         target="/var/lib/extensions/$1-$image_version.raw"
         previous=
