@@ -60,6 +60,13 @@ for file in "$signing_key" "$signing_cert" "$release_pub"; do
     [ -s "$file" ] || { printf 'Missing %s\n' "$file" >&2; exit 1; }
 done
 
+# Scratch goes on disk, not in /tmp. These images are over a gigabyte each and
+# /tmp is tmpfs here, so the default would expand them into RAM and starve
+# anything else building at the same time.
+: "${TMPDIR:=$PWD/dist/scratch}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 if [ "$variant" = fleet ] || [ "$variant" = playground ]; then

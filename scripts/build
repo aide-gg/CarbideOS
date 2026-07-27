@@ -52,7 +52,7 @@ case "$variant" in
         verity_key=keys/verity/verity.key
         verity_cert=keys/verity/verity.crt
         release_pub=keys/manifest/release-signing.pub.asc
-        admin_group=wheel
+        admin_group=wheel,carbide-operator
         output=carbideos-debug
         ;;
     development)
@@ -61,7 +61,7 @@ case "$variant" in
         verity_key=keys/verity/verity.key
         verity_cert=keys/verity/verity.crt
         release_pub=keys/manifest/release-signing.pub.asc
-        admin_group=wheel
+        admin_group=wheel,carbide-operator
         output=carbideos
         ;;
 esac
@@ -196,6 +196,10 @@ if [ "$variant" != playground ]; then
     install -m 0644 keys/admin/ace-mgmt.pub \
         "$extra/usr/lib/carbideos/authorized_keys/ace-mgmt"
 fi
+# A comma separated list, because development images keep wheel for a human
+# while also joining carbide-operator, so the command broker behaves exactly as
+# it does on a fleet node. Divergence here is how a fleet-only failure hides
+# behind a passing development test.
 printf '%s\n' "$admin_group" >"$extra/usr/lib/carbideos/admin-group"
 install -d -m 0755 "$extra/usr/share/carbideos"
 gpg --batch --dearmor <"$release_pub" | base64 -w 0 \
