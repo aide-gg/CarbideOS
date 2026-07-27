@@ -13,12 +13,28 @@ unset CDPATH ENV BASH_ENV GPG_TTY SSH_AUTH_SOCK
 
 usage() {
     printf '%s\n' \
-        'Usage: carbideos-ops health|logs|reboot|poweroff|update' \
+        'Usage: carbideos-ops health|reboot|poweroff|update' \
+        '       carbideos-ops logs                   system warnings this boot' \
+        '       carbideos-ops logs watchtower        the supervisor, all priorities' \
+        '       carbideos-ops logs job ID            one ACE job, all priorities' \
+        '       carbideos-ops stop-job ID' \
         '       carbideos-ops extension install|remove rat-game-16' \
         '       carbideos-ops node-id' \
         '       carbideos-ops credential NAME        (value on stdin)' \
         '       carbideos-ops install-extension NAME (image on stdin)' >&2
     exit 2
+}
+
+# A job identifier, and nothing else, may be interpolated into a unit name.
+# Without this an operator could name any unit on the system and this would stop
+# it or read its journal.
+job_unit() {
+    printf '%s' "$1" | /usr/bin/grep -qE \
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || {
+        printf 'Not a job identifier: %s\n' "$1" >&2
+        exit 2
+    }
+    printf 'ace@%s.service' "$1"
 }
 
 # Credentials a node may be given during provisioning. Restricting the names is
@@ -56,10 +72,51 @@ case "$operation" in
             /usr/bin/systemctl is-system-running --wait
         ;;
     logs)
-        [ "$#" -eq 0 ] || usage
-        exec /usr/bin/env -i PATH="$PATH" \
-            /usr/bin/journalctl --boot --priority=warning..alert \
-                --lines=300 --no-pager
+        # Without a unit this stays at warning and above, because the whole
+        # system journal at every priority is more than an operator needs and
+        # belongs to services this tool has no business exposing.
+        #
+        # The two units below are the ones a node exists to run, and an operator
+        # who can already write credentials and install extensions here gains
+        # nothing by reading them. Diagnosing a node without them meant guessing
+        # from a failed unit and a truncated warning, which is how a job that
+        # finished its work but never exited went unnoticed on two nodes.
+        case "${1-}" in
+            '')
+                exec /usr/bin/env -i PATH="$PATH" \
+                    /usr/bin/journalctl --boot --priority=warning..alert \
+                        --lines=300 --no-pager
+                ;;
+            watchtower)
+                [ "$#" -eq 1 ] || usage
+                exec /usr/bin/env -i PATH="$PATH" \
+                    /usr/bin/journalctl --boot --unit=watchtower.service \
+                        --lines=500 --no-pager
+                ;;
+            job)
+                [ "$#" -eq 2 ] || usage
+                unit=$(job_unit "$2")
+                exec /usr/bin/env -i PATH="$PATH" \
+                    /usr/bin/journalctl --boot --unit="$unit" \
+                        --lines=500 --no-pager
+                ;;
+            *) usage ;;
+        esac
+        ;;
+    stop-job)
+        # Stopping the unit is all this does. Watchtower notices it go inactive
+        # on its next sweep and retires the job itself, releasing the queue
+        # entry and the execution lease through the ordinary path, so this does
+        # not touch Redis and cannot leave a half retired job behind.
+        [ "$#" -eq 1 ] || usage
+        unit=$(job_unit "$1")
+        /usr/bin/systemctl list-units --all --no-legend "$unit" 2>/dev/null \
+            | /usr/bin/grep -q . || {
+            printf 'No such job on this node: %s\n' "$1" >&2
+            exit 1
+        }
+        /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl stop "$unit"
+        printf 'job %s stopped\n' "$1"
         ;;
     reboot)
         [ "$#" -eq 0 ] || usage
