@@ -112,21 +112,35 @@ api() {
 # Scratch goes on disk, not in /tmp. These images are over a gigabyte each and
 # /tmp is tmpfs here, so the default would expand them into RAM and starve
 # anything else building at the same time.
+#
+# Some of these builds run under sudo and some do not, so the directory is
+# sticky and world writable exactly as /tmp is. Without that, whichever build
+# ran first would own it and lock the other one out. mktemp still creates
+# private subdirectories inside, so nothing is shared between users.
 : "${TMPDIR:=$PWD/dist/scratch}"
 export TMPDIR
-mkdir -p "$TMPDIR"
+mkdir -p "$TMPDIR" 2>/dev/null || :
+chmod 1777 "$TMPDIR" 2>/dev/null || :
+[ -w "$TMPDIR" ] || {
+    printf 'Scratch directory %s is not writable\n' "$TMPDIR" >&2
+    exit 1
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-# Name the uploaded artifact after the image, not after the temporary file it
-# may be decompressed into, so distinct images cannot overwrite one another in
-# the import storage.
+# The uploaded artifact carries a digest of its own contents, because the
+# upload is skipped when a volume of that name already exists and the API token
+# deliberately cannot delete from import storage.
+#
+# Naming it after the image alone is not enough: every release ships the same
+# file name and only the parent directory carries the version, so 0.1.41 would
+# be seen as already present and the node would silently boot 0.1.40 instead.
+# A digest in the name means a matching name really does mean matching bytes.
+printf 'Digesting %s\n' "$image"
+digest=$(sha256sum "$image" | cut -c1-12)
 artifact=$(basename "$image" .zst)
-case "$artifact" in
-    *.raw) ;;
-    *) artifact="$artifact.raw" ;;
-esac
+artifact="${artifact%.raw}-${digest}.raw"
 
 # The import storage holds raw disks, so a compressed image is expanded first.
 case "$image" in

@@ -63,9 +63,19 @@ done
 # Scratch goes on disk, not in /tmp. These images are over a gigabyte each and
 # /tmp is tmpfs here, so the default would expand them into RAM and starve
 # anything else building at the same time.
+#
+# Some of these builds run under sudo and some do not, so the directory is
+# sticky and world writable exactly as /tmp is. Without that, whichever build
+# ran first would own it and lock the other one out. mktemp still creates
+# private subdirectories inside, so nothing is shared between users.
 : "${TMPDIR:=$PWD/dist/scratch}"
 export TMPDIR
-mkdir -p "$TMPDIR"
+mkdir -p "$TMPDIR" 2>/dev/null || :
+chmod 1777 "$TMPDIR" 2>/dev/null || :
+[ -w "$TMPDIR" ] || {
+    printf 'Scratch directory %s is not writable\n' "$TMPDIR" >&2
+    exit 1
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
