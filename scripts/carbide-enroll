@@ -1,0 +1,198 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Bring a booted CarbideOS node into service over SSH.
+#
+# Deliberately knows nothing about Proxmox. A node is reached by address, so the
+# same steps work on any provider, which is the point: SSH is the only channel
+# that exists everywhere, and this is the part Drydock will eventually run.
+#
+# A freshly provisioned node has an empty state partition. It has no
+# credentials, no system extensions and no ACE release, so it boots healthy and
+# does nothing. Every step below exists to close one of those gaps.
+set -eu
+umask 077
+
+cd "$(dirname "$0")/.."
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: carbide-enroll HOST [options]
+
+  --credentials FILE     KEY=VALUE lines to install as node credentials
+  --github-token FILE    token used to fetch private ACE releases
+  --extension NAME=PATH  signed extension image to install (repeatable)
+  --ssh-user USER        defaults to ace-mgmt
+  --ssh-key FILE         defaults to keys/admin/ace-mgmt.pub
+  --password FILE        sudo password, defaults to keys/admin/ace-mgmt.password
+  --timeout SECONDS      how long to wait for SSH, defaults to 600
+EOF
+    exit 2
+}
+
+host=
+credentials=
+github_token=
+extensions=
+ssh_user=ace-mgmt
+ssh_key=keys/admin/ace-mgmt.pub
+password_file=keys/admin/ace-mgmt.password
+timeout=600
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --credentials) credentials=${2:?}; shift 2 ;;
+        --github-token) github_token=${2:?}; shift 2 ;;
+        --extension) extensions="$extensions ${2:?}"; shift 2 ;;
+        --ssh-user) ssh_user=${2:?}; shift 2 ;;
+        --ssh-key) ssh_key=${2:?}; shift 2 ;;
+        --password) password_file=${2:?}; shift 2 ;;
+        --timeout) timeout=${2:?}; shift 2 ;;
+        -*) usage ;;
+        *) [ -z "$host" ] || usage; host=$1; shift ;;
+    esac
+done
+[ -n "$host" ] || usage
+
+for file in "$ssh_key" "$password_file"; do
+    [ -s "$file" ] || { printf 'Missing %s\n' "$file" >&2; exit 1; }
+done
+
+ssh_options="-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8"
+ssh_options="$ssh_options -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+remote() {
+    # shellcheck disable=SC2086
+    ssh $ssh_options -i "$ssh_key" "$ssh_user@$host" "$@"
+}
+
+# Runs a script as root, reading it from stdin, with trailing arguments passed
+# through as positional parameters.
+#
+# The script is staged to a file first because sudo -S consumes stdin to read
+# the password, so a script arriving the same way would be eaten by it. Passing
+# the script as an argument instead would put it in the node's process table.
+remote_root() {
+    staged=/tmp/.carbide-step.$$.sh
+    remote "cat >$staged" || return 1
+    # The inner expansions are deliberately evaluated on the node, not here.
+    # shellcheck disable=SC2016
+    runner='IFS= read -r password; printf "%s\n" "$password" | sudo -S -p "" /bin/sh'
+    { cat "$password_file"; printf '\n'; } \
+        | remote "$runner $staged $*; status=\$?; rm -f $staged; exit \$status"
+}
+
+copy() {
+    # shellcheck disable=SC2086
+    scp -q $ssh_options -i "$ssh_key" "$1" "$ssh_user@$host:$2"
+}
+
+printf '== waiting for %s ==\n' "$host"
+deadline=$(( $(date +%s) + timeout ))
+until remote 'true' 2>/dev/null; do
+    [ "$(date +%s)" -lt "$deadline" ] || {
+        printf 'Timed out waiting for SSH on %s\n' "$host" >&2
+        exit 1
+    }
+    sleep 5
+done
+printf '  reachable as %s\n' "$ssh_user"
+
+if [ -n "$credentials" ]; then
+    [ -s "$credentials" ] || { printf 'Missing %s\n' "$credentials" >&2; exit 1; }
+    printf '== installing node credentials ==\n'
+    copy "$credentials" '/tmp/.carbide-credentials'
+    remote_root <<'EOF'
+set -eu
+install -d -m 0700 -o root -g root /var/lib/watchtower/credentials
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    name=${line%%=*}
+    value=${line#*=}
+    printf '%s' "$value" >"/var/lib/watchtower/credentials/$name"
+    chmod 0600 "/var/lib/watchtower/credentials/$name"
+done </tmp/.carbide-credentials
+chown -R root:root /var/lib/watchtower/credentials
+shred -u /tmp/.carbide-credentials
+printf '  installed %s credentials\n' "$(ls /var/lib/watchtower/credentials | wc -l)"
+EOF
+fi
+
+if [ -n "$github_token" ]; then
+    [ -s "$github_token" ] || { printf 'Missing %s\n' "$github_token" >&2; exit 1; }
+    printf '== installing release token ==\n'
+    copy "$github_token" '/tmp/.carbide-token'
+    remote_root <<'EOF'
+set -eu
+install -d -m 0700 -o root -g root /var/lib/watchtower/credentials
+tr -d '\n' </tmp/.carbide-token >/var/lib/watchtower/credentials/GITHUB_TOKEN
+chmod 0600 /var/lib/watchtower/credentials/GITHUB_TOKEN
+chown root:root /var/lib/watchtower/credentials/GITHUB_TOKEN
+shred -u /tmp/.carbide-token
+printf '  release token installed\n'
+EOF
+fi
+
+for entry in $extensions; do
+    name=${entry%%=*}
+    path=${entry#*=}
+    [ -s "$path" ] || { printf 'Missing extension image %s\n' "$path" >&2; exit 1; }
+    printf '== installing the %s extension ==\n' "$name"
+    copy "$path" "/tmp/.carbide-$name.raw"
+    remote_root "$name" <<'EOF'
+set -eu
+name=$1
+install -d -m 0755 /var/lib/extensions
+# Only the active image may end in .raw; systemd-sysext merges every match.
+install -m 0644 "/tmp/.carbide-$name.raw" "/var/lib/extensions/$name.raw"
+rm -f "/tmp/.carbide-$name.raw"
+printf '  %s installed\n' "$name"
+EOF
+done
+
+if [ -n "$extensions" ]; then
+    printf '== merging extensions ==\n'
+    remote_root <<'EOF'
+set -eu
+systemctl restart systemd-sysext.service
+# The unit shipped inside an extension only becomes visible once the manager has
+# reloaded, and a refresh does not restart an already running service.
+systemctl restart watchtower.service 2>/dev/null || true
+systemd-sysext status --no-pager | tail -n +2 | sed 's/^/  /'
+EOF
+fi
+
+printf '== waiting for the node to report healthy ==\n'
+deadline=$(( $(date +%s) + 180 ))
+while :; do
+    state=$(remote 'systemctl is-active watchtower.service' 2>/dev/null || true)
+    if [ "$state" = active ]; then
+        printf '  watchtower active\n'
+        break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        printf 'Watchtower did not become active (last state: %s)\n' "${state:-unknown}" >&2
+        remote_root <<'EOF' || true
+journalctl -u watchtower.service -b --no-pager -o cat | tail -15 | sed 's/^/  /'
+EOF
+        exit 1
+    fi
+    sleep 5
+done
+
+node_id=$(remote_root <<'EOF' || true
+cat /var/lib/watchtower/node-id 2>/dev/null
+EOF
+)
+node_id=$(printf '%s' "$node_id" | tr -d '\r\n ')
+
+printf '\n== enrolled ==\n'
+printf '  host:    %s\n' "$host"
+[ -n "$node_id" ] && printf '  node id: %s\n' "$node_id"
+printf '\nActivate its first ACE release with:\n'
+if [ -n "$node_id" ]; then
+    printf '  orchestrator ace update ace-<commit> --node %s\n' "$node_id"
+else
+    printf '  orchestrator ace update ace-<commit> --node <node id>\n'
+fi
