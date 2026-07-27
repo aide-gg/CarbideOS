@@ -55,9 +55,25 @@ if [ -z "$profile" ]; then
 fi
 
 source=$(realpath "$1")
-prefix=${CARBIDEOS_R2_PREFIX:-carbideos}
+
+# The channel follows the directory being published, because these were once
+# independent: the destination defaulted to the development channel whatever
+# was handed to it, so publishing dist/update-feed/fleet without remembering
+# the environment variable aimed fleet images at the development channel. Only
+# the signature check caught it, and only because the two channels are signed
+# by different keys.
+case "$(basename "$source")" in
+    fleet) derived=carbideos/fleet ;;
+    playground) derived=carbideos/playground ;;
+    *) derived=carbideos ;;
+esac
+prefix=${CARBIDEOS_R2_PREFIX:-$derived}
 prefix=${prefix#/}
 prefix=${prefix%/}
+if [ -n "${CARBIDEOS_R2_PREFIX:-}" ] && [ "$prefix" != "$derived" ]; then
+    printf 'Publishing %s to the %s channel, which does not follow from its path.\n' \
+        "$source" "$prefix" >&2
+fi
 case "$prefix" in
     carbideos)
         artifact_prefix=carbideos
