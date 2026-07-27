@@ -250,7 +250,12 @@ case "$operation" in
         fi
         trap '/usr/bin/rm -f "$staging"' EXIT HUP INT TERM
         running=$(running_base_version)
-        target="/var/lib/extensions/$1-$image_version.raw"
+        # An underscore, because systemd strips a version from an image name
+        # only after that separator. With any other one it looks for an
+        # extension-release named after the whole string, does not find it, and
+        # reports the image unreadable rather than incompatible, which fails
+        # the whole merge and takes every other extension down with it.
+        target="/var/lib/extensions/$1_$image_version.raw"
         previous=
         if [ -f "$target" ]; then
             previous="/var/lib/extensions/.$1.previous"
@@ -300,11 +305,11 @@ case "$operation" in
             # Keep the running base's image and one neighbour, so a rollback
             # still finds its extension while the state partition stays bounded.
             # These are hundreds of megabytes each.
-            for stale in $(/usr/bin/ls -1 "/var/lib/extensions/$1-"*.raw 2>/dev/null \
-                | /usr/bin/sed "s|.*/$1-||;s|\.raw$||" \
+            for stale in $(/usr/bin/ls -1 "/var/lib/extensions/$1_"*.raw 2>/dev/null \
+                | /usr/bin/sed "s|.*/$1_||;s|\.raw$||" \
                 | /usr/bin/sort -V | /usr/bin/head -n -2); do
                 if [ "$stale" != "$running" ]; then
-                    /usr/bin/rm -f "/var/lib/extensions/$1-$stale.raw"
+                    /usr/bin/rm -f "/var/lib/extensions/$1_$stale.raw"
                 fi
             done
             if [ "$image_version" = "$running" ]; then

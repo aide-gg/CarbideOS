@@ -43,8 +43,13 @@ fn legacy_active_path(name: &str) -> PathBuf {
     Path::new(EXTENSIONS_DIR).join(format!("{name}.raw"))
 }
 
+/// An underscore, because systemd derives an extension's name from its file
+/// name and strips a version only after that separator. With any other one it
+/// looks for an extension-release file named after the whole string, fails to
+/// find it, and reports the image unreadable rather than merely incompatible,
+/// which fails the entire merge and takes every other extension down with it.
 pub fn scoped_active_path(name: &str, os_version: &str) -> PathBuf {
-    Path::new(EXTENSIONS_DIR).join(format!("{name}-{os_version}.raw"))
+    Path::new(EXTENSIONS_DIR).join(format!("{name}_{os_version}.raw"))
 }
 
 pub fn active_path(name: &str) -> PathBuf {
@@ -63,11 +68,11 @@ pub fn active_path(name: &str) -> PathBuf {
 }
 
 pub fn rollback_path(name: &str, version: &str) -> PathBuf {
-    Path::new(EXTENSIONS_DIR).join(format!("{name}-{}.raw.{version}.rollback", scope()))
+    Path::new(EXTENSIONS_DIR).join(format!("{name}_{}.raw.{version}.rollback", scope()))
 }
 
 pub fn candidate_path(name: &str, version: &str) -> PathBuf {
-    Path::new(EXTENSIONS_DIR).join(format!("{name}-{}.raw.{version}.candidate", scope()))
+    Path::new(EXTENSIONS_DIR).join(format!("{name}_{}.raw.{version}.candidate", scope()))
 }
 
 /// Bytes available on the filesystem backing the extensions directory.
