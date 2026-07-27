@@ -210,8 +210,21 @@ case "$operation" in
         }
         /usr/bin/chmod 0644 "$staging"
         /usr/bin/mv -f "$staging" "$target"
+        # A refresh exits zero even when it silently skips an image whose
+        # extension-release does not match the running base, so its status
+        # alone would report success for an extension that never merged. The
+        # merged tree is the only honest evidence.
+        merged_ok=0
         if /usr/bin/env -i PATH="$PATH" \
             /usr/bin/systemd-sysext --image-policy="$policy" refresh; then
+            # Written as a plain if, because an && list that fails here is the
+            # last command in this branch and set -e would abort the script
+            # before the image below could be rolled back.
+            if [ -f "/usr/lib/extension-release.d/extension-release.$1" ]; then
+                merged_ok=1
+            fi
+        fi
+        if [ "$merged_ok" -eq 1 ]; then
             /usr/bin/rm -f "$previous"
             # A refresh does not restart a service that is already running, so
             # it would keep executing the previous image until something else
@@ -229,7 +242,8 @@ case "$operation" in
             fi
             /usr/bin/env -i PATH="$PATH" \
                 /usr/bin/systemd-sysext --image-policy="$policy" refresh || true
-            printf 'Extension %s was rejected and has been removed\n' "$1" >&2
+            printf 'Extension %s did not merge and has been removed\n' "$1" >&2
+            printf 'It is signed for a different CarbideOS version, or its verity signature was refused.\n' >&2
             exit 1
         fi
         ;;

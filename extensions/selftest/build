@@ -106,7 +106,6 @@ EOF
 cat >"$root/usr/lib/extension-release.d/extension-release.selftest" <<EOF
 ID=carbideos
 VERSION_ID=$version
-SYSEXT_LEVEL=1
 ARCHITECTURE=x86-64
 SYSEXT_ID=selftest
 SYSEXT_VERSION_ID=$revision

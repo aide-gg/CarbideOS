@@ -142,7 +142,6 @@ gpg --batch --yes --dearmor \
 cat >"$root/usr/lib/extension-release.d/extension-release.watchtower" <<EOF
 ID=carbideos
 VERSION_ID=$version
-SYSEXT_LEVEL=1
 ARCHITECTURE=x86-64
 SYSEXT_ID=watchtower
 SYSEXT_VERSION_ID=$(sed -n 's/^version = "\(.*\)"/\1/p' "$watchtower_source/Cargo.toml" | head -1)

@@ -177,7 +177,6 @@ ln -s /opt/google/chrome/google-chrome "$root/usr/bin/google-chrome"
 cat >"$root/usr/lib/extension-release.d/extension-release.chrome" <<EOF
 ID=carbideos
 VERSION_ID=$version
-SYSEXT_LEVEL=1
 ARCHITECTURE=x86-64
 SYSEXT_ID=chrome
 SYSEXT_VERSION_ID=$chrome_version
