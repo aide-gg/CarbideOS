@@ -1,52 +1,72 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Rebuild a Proxmox VM from a CarbideOS image. Every node is disposable, so
-# provisioning replaces the boot disk outright rather than updating in place.
-# A partition layout change cannot be applied to a running node: repart grows
-# a partition into adjacent free space and never relocates one, so a node laid
-# out by an older image has to be recreated.
+# Build a CarbideOS node on Proxmox from an image, then hand it to
+# carbide-enroll to bring it into service.
+#
+# Nodes are disposable, so this replaces the boot disk outright rather than
+# updating in place. A partition layout change cannot be applied to a running
+# node either: repart grows a partition into adjacent free space and never
+# relocates one, so a node laid out by an older image has to be recreated.
+#
+# Everything is created into the carbide pool. The API token is scoped to that
+# pool, so a node cannot be created outside it even by mistake.
 set -eu
 
 cd "$(dirname "$0")/.."
 
-size=16G
-assume_yes=0
+usage() {
+    cat >&2 <<'EOF'
+Usage: proxmox-provision VMID IMAGE [options]
+
+  --name NAME        VM name, defaults to CarbideOS-<vmid>
+  --memory MiB       defaults to 4096
+  --cores N          defaults to 2
+  --size SIZE        boot disk, defaults to 16G
+  --pool POOL        defaults to carbide
+  --yes              do not ask before destroying disks
+  --no-enroll        stop after the node boots
+
+Any further options are passed to carbide-enroll, for example:
+  --credentials FILE  --github-token FILE  --extension NAME=PATH
+EOF
+    exit 2
+}
+
 vmid=
 image=
+name=
+memory=4096
+cores=2
+size=16G
+pool=carbide
+assume_yes=0
+enroll=1
+enroll_args=""
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --size)
-            [ "$#" -ge 2 ] || { printf '%s\n' 'Missing --size value.' >&2; exit 2; }
-            size=$2
-            shift
-            ;;
-        --yes) assume_yes=1 ;;
-        -*)
-            printf 'Usage: %s VMID IMAGE [--size 16G] [--yes]\n' "$0" >&2
-            exit 2
-            ;;
+        --name) name=${2:?}; shift 2 ;;
+        --memory) memory=${2:?}; shift 2 ;;
+        --cores) cores=${2:?}; shift 2 ;;
+        --size) size=${2:?}; shift 2 ;;
+        --pool) pool=${2:?}; shift 2 ;;
+        --yes) assume_yes=1; shift ;;
+        --no-enroll) enroll=0; shift ;;
+        --credentials|--github-token|--extension|--ssh-user|--ssh-key|--password)
+            enroll_args="$enroll_args $1 ${2:?}"; shift 2 ;;
+        -*) usage ;;
         *)
-            if [ -z "$vmid" ]; then
-                vmid=$1
-            elif [ -z "$image" ]; then
-                image=$1
-            else
-                printf 'Usage: %s VMID IMAGE [--size 16G] [--yes]\n' "$0" >&2
-                exit 2
+            if [ -z "$vmid" ]; then vmid=$1
+            elif [ -z "$image" ]; then image=$1
+            else usage
             fi
-            ;;
+            shift ;;
     esac
-    shift
 done
-if [ -z "$vmid" ] || [ -z "$image" ]; then
-    printf 'Usage: %s VMID IMAGE [--size 16G] [--yes]\n' "$0" >&2
-    exit 2
-fi
-if [ ! -s "$image" ]; then
-    printf 'Missing image: %s\n' "$image" >&2
-    exit 1
-fi
+if [ -z "$vmid" ] || [ -z "$image" ]; then usage; fi
+[ -s "$image" ] || { printf 'Missing image: %s\n' "$image" >&2; exit 1; }
+[ -n "$name" ] || name="CarbideOS-$vmid"
 
 for command in curl jq; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -61,9 +81,9 @@ if [ -f .env.proxmox ]; then
     . ./.env.proxmox
     set +a
 fi
-for name in PROXMOX_HOST PROXMOX_USER PROXMOX_TOKEN_NAME PROXMOX_TOKEN_SECRET; do
-    eval "value=\${$name:-}"
-    [ -n "$value" ] || { printf 'Missing %s.\n' "$name" >&2; exit 2; }
+for variable in PROXMOX_HOST PROXMOX_USER PROXMOX_TOKEN_NAME PROXMOX_TOKEN_SECRET; do
+    eval "value=\${$variable:-}"
+    [ -n "$value" ] || { printf 'Missing %s.\n' "$variable" >&2; exit 2; }
 done
 
 case "$PROXMOX_HOST" in
@@ -77,6 +97,8 @@ esac
 node=${PROXMOX_NODE:-Prox-PC}
 import_storage=${CARBIDEOS_PROXMOX_IMPORT_STORAGE:-carbide-import}
 disk_storage=${CARBIDEOS_PROXMOX_DISK_STORAGE:-local-lvm}
+efi_storage=${CARBIDEOS_PROXMOX_EFI_STORAGE:-sam980}
+bridge=${CARBIDEOS_PROXMOX_BRIDGE:-vmbr0}
 auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
 vm="$base/nodes/$node/qemu/$vmid"
 
@@ -90,8 +112,7 @@ api() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-# A compressed image has to be expanded before upload; the import storage
-# stores raw disks.
+# The import storage holds raw disks, so a compressed image is expanded first.
 case "$image" in
     *.zst)
         command -v zstd >/dev/null 2>&1 || {
@@ -104,90 +125,122 @@ case "$image" in
         ;;
 esac
 
-name=$(basename "$image")
-case "$name" in
+artifact=$(basename "$image")
+case "$artifact" in
     *.raw) ;;
-    *) name="$name.raw" ;;
+    *) artifact="$artifact.raw" ;;
 esac
-volume="$import_storage:import/$name"
+volume="$import_storage:import/$artifact"
 
-current=$(api GET "$vm/config" | jq -r '.data.name // "?"')
-printf 'Reprovisioning VM %s (%s) on %s\n' "$vmid" "$current" "$node"
-printf '  image: %s\n' "$image"
-printf '  disk:  %s at %s\n' "$disk_storage" "$size"
-printf '\n%s\n' 'This destroys every disk currently attached to the VM.'
+exists=0
+if api GET "$vm/config" >/dev/null 2>&1; then
+    exists=1
+fi
+
+printf 'Provisioning VM %s (%s) on %s\n' "$vmid" "$name" "$node"
+printf '  image:  %s\n' "$image"
+printf '  disk:   %s at %s\n' "$disk_storage" "$size"
+printf '  memory: %s MiB, cores: %s\n' "$memory" "$cores"
+printf '  pool:   %s\n' "$pool"
+if [ "$exists" -eq 1 ]; then
+    printf '\n%s\n' 'This destroys every disk currently attached to the VM.'
+else
+    printf '\n%s\n' 'This creates a new VM.'
+fi
 if [ "$assume_yes" -eq 0 ]; then
     printf 'Type the VM id to continue: '
     read -r confirm
     [ "$confirm" = "$vmid" ] || { printf '%s\n' 'Aborted.' >&2; exit 1; }
 fi
 
-status=$(api GET "$vm/status/current" | jq -r '.data.status')
-if [ "$status" != stopped ]; then
-    printf 'Stopping VM %s\n' "$vmid"
-    upid=$(api POST "$vm/status/stop" | jq -r '.data')
-    ./scripts/proxmox-wait-task "$upid" 120
+if [ "$exists" -eq 0 ]; then
+    printf 'Creating VM %s\n' "$vmid"
+    # Matches the other Carbide nodes: q35 with OVMF so the signed boot chain
+    # works, virtio-scsi-single for per-disk iothreads, and a guest agent so the
+    # host can report the address.
+    upid=$(api POST "$base/nodes/$node/qemu" \
+        --data-urlencode "vmid=$vmid" \
+        --data-urlencode "name=$name" \
+        --data-urlencode "pool=$pool" \
+        --data-urlencode "memory=$memory" \
+        --data-urlencode "cores=$cores" \
+        --data-urlencode "sockets=1" \
+        --data-urlencode "cpu=x86-64-v2-AES" \
+        --data-urlencode "numa=1" \
+        --data-urlencode "machine=q35" \
+        --data-urlencode "bios=ovmf" \
+        --data-urlencode "ostype=l26" \
+        --data-urlencode "agent=1" \
+        --data-urlencode "scsihw=virtio-scsi-single" \
+        --data-urlencode "net0=virtio,bridge=$bridge,firewall=1" \
+        --data-urlencode "efidisk0=$efi_storage:0,efitype=4m,pre-enrolled-keys=0" \
+        | jq -r '.data // empty')
+    [ -z "$upid" ] || ./scripts/proxmox-wait-task "$upid" 300
+else
+    status=$(api GET "$vm/status/current" | jq -r '.data.status')
+    if [ "$status" != stopped ]; then
+        printf 'Stopping VM %s\n' "$vmid"
+        upid=$(api POST "$vm/status/stop" | jq -r '.data')
+        ./scripts/proxmox-wait-task "$upid" 120
+    fi
+
+    # A snapshot pins the volumes it was taken against, so the old disks cannot
+    # be removed while one exists. They describe a machine being discarded.
+    attempt=0
+    while [ "$attempt" -lt 32 ]; do
+        attempt=$((attempt + 1))
+        snapshot=$(api GET "$vm/snapshot" \
+            | jq -r '[.data[] | select(.name != "current") | .name] | first // empty')
+        [ -n "$snapshot" ] || break
+        printf 'Deleting snapshot %s\n' "$snapshot"
+        upid=$(api DELETE "$vm/snapshot/$snapshot" | jq -r '.data')
+        ./scripts/proxmox-wait-task "$upid" 600
+    done
+
+    # Detaching leaves the volume behind as unusedN, so drop the attachments
+    # first and then delete whatever they became.
+    attached=$(api GET "$vm/config" \
+        | jq -r '.data | keys[] | select(test("^(scsi|virtio|sata|ide)[0-9]+$"))' \
+        | grep -v '^ide2$' || true)
+    for disk in $attached; do
+        printf 'Detaching %s\n' "$disk"
+        api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
+    done
+
+    # Proxmox renumbers the unused entries after each removal, so a list
+    # captured up front goes stale as soon as the first one is deleted.
+    attempt=0
+    while [ "$attempt" -lt 32 ]; do
+        attempt=$((attempt + 1))
+        disk=$(api GET "$vm/config" \
+            | jq -r '[.data | keys[] | select(test("^unused[0-9]+$"))] | sort | first // empty')
+        [ -n "$disk" ] || break
+        printf 'Deleting %s\n' "$disk"
+        api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
+    done
 fi
 
 if api GET "$base/nodes/$node/storage/$import_storage/content" \
-    | jq -e --arg volid "$volume" '.data[]? | select(.volid == $volid)' \
-    >/dev/null 2>&1; then
+    | jq -e --arg volid "$volume" '.data[]? | select(.volid == $volid)' >/dev/null 2>&1; then
     printf 'Image already present: %s\n' "$volume"
 else
-    printf 'Uploading %s to %s\n' "$name" "$import_storage"
+    printf 'Uploading %s to %s\n' "$artifact" "$import_storage"
     upid=$(curl -kfsS -H "$auth" \
         -F content=import \
-        -F "filename=@$image;filename=$name" \
+        -F "filename=@$image;filename=$artifact" \
         "$base/nodes/$node/storage/$import_storage/upload" | jq -r '.data')
     ./scripts/proxmox-wait-task "$upid" 1800
 fi
 
-# A snapshot pins the volumes it was taken against, so the old disks cannot be
-# removed while one exists. They describe the machine that is being discarded.
-attempt=0
-while [ "$attempt" -lt 32 ]; do
-    attempt=$((attempt + 1))
-    snapshot=$(api GET "$vm/snapshot" \
-        | jq -r '[.data[] | select(.name != "current") | .name] | first // empty')
-    [ -n "$snapshot" ] || break
-    printf 'Deleting snapshot %s\n' "$snapshot"
-    upid=$(api DELETE "$vm/snapshot/$snapshot" | jq -r '.data')
-    ./scripts/proxmox-wait-task "$upid" 600
-done
-
-# Detaching leaves the volume behind as unusedN, so drop the attachments first
-# and then delete whatever they became.
-attached=$(api GET "$vm/config" \
-    | jq -r '.data | keys[] | select(test("^(scsi|virtio|sata|ide)[0-9]+$"))' \
-    | grep -v '^ide2$' || true)
-for disk in $attached; do
-    printf 'Detaching %s\n' "$disk"
-    api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
-done
-# Proxmox renumbers the unused entries after each removal, so a list captured
-# up front goes stale as soon as the first one is deleted. Re-read the config
-# and always remove the lowest remaining entry.
-attempt=0
-while [ "$attempt" -lt 32 ]; do
-    attempt=$((attempt + 1))
-    disk=$(api GET "$vm/config" \
-        | jq -r '[.data | keys[] | select(test("^unused[0-9]+$"))] | sort | first // empty')
-    [ -n "$disk" ] || break
-    printf 'Deleting %s\n' "$disk"
-    api PUT "$vm/config" --data-urlencode "delete=$disk" >/dev/null
-done
-
 printf 'Importing %s as scsi0\n' "$volume"
 upid=$(api POST "$vm/config" \
     --data-urlencode \
-        "scsi0=$disk_storage:0,import-from=$volume,ssd=1,cache=writeback,iothread=1" \
+        "scsi0=$disk_storage:0,import-from=$volume,discard=on,iothread=1,ssd=1,cache=writeback" \
     | jq -r '.data // empty')
 [ -z "$upid" ] || ./scripts/proxmox-wait-task "$upid" 1800
 
 printf 'Resizing scsi0 to %s\n' "$size"
-api PUT "$vm/resize" --data-urlencode 'disk=scsi0' \
-    --data-urlencode "size=$size" >/dev/null
-
+api PUT "$vm/resize" --data-urlencode 'disk=scsi0' --data-urlencode "size=$size" >/dev/null
 api POST "$vm/config" --data-urlencode 'boot=order=scsi0' >/dev/null
 
 printf 'Starting VM %s\n' "$vmid"
@@ -197,3 +250,17 @@ upid=$(api POST "$vm/status/start" | jq -r '.data')
 # First boot runs repart and reboots once so the encrypted state and swap it
 # creates are discovered from the initrd, so allow for two boots.
 ./scripts/proxmox-wait-ssh "$vmid" 600
+
+if [ "$enroll" -eq 1 ]; then
+    address=$(api GET "$vm/agent/network-get-interfaces" \
+        | jq -r '.data.result[]?["ip-addresses"][]?
+                 | select(.["ip-address-type"] == "ipv4" and .["ip-address"] != "127.0.0.1")
+                 | .["ip-address"]' | head -n 1)
+    [ -n "$address" ] || {
+        printf 'Could not determine the address of VM %s\n' "$vmid" >&2
+        exit 1
+    }
+    printf '\n'
+    # shellcheck disable=SC2086
+    exec ./scripts/carbide-enroll "$address" $enroll_args
+fi
