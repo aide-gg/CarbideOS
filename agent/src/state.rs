@@ -62,8 +62,31 @@ pub struct ExtensionState {
     pub last_health: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
+    /// The base image that was running when a terminal phase was recorded.
+    ///
+    /// Extension state lives on the state partition and so outlives any base
+    /// rollback. Without this, a node that gave up on an extension while
+    /// running a bad image kept refusing it after rolling back to a good one:
+    /// the extension was merged and working, the gate failed anyway, and the
+    /// next legitimate update would have been reverted on a healthy image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_os_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_requests: Vec<String>,
+}
+
+/// The running base image version, as the agent should record it.
+///
+/// Read from the sealed image rather than tracked in state, so it cannot drift
+/// from the image actually booted.
+pub fn os_version() -> Option<String> {
+    let contents = fs::read_to_string("/etc/os-release").ok()?;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("VERSION_ID=") {
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
 }
 
 impl ExtensionState {
@@ -93,6 +116,29 @@ pub struct State {
 }
 
 impl State {
+    /// Forget a refusal that belongs to a base image no longer running.
+    ///
+    /// A terminal phase means "do not retry this automatically", which is right
+    /// while the conditions that caused it still hold. A base rollback replaces
+    /// exactly those conditions, so carrying the refusal across would leave a
+    /// recovered node permanently ungated for no reason.
+    pub fn forget_stale_terminals(&mut self, current: &str) -> Vec<String> {
+        let mut cleared = Vec::new();
+        for (name, entry) in self.extensions.iter_mut() {
+            if !entry.phase.is_terminal() {
+                continue;
+            }
+            if entry.terminal_os_version.as_deref() == Some(current) {
+                continue;
+            }
+            entry.phase = Phase::Idle;
+            entry.last_failure = None;
+            entry.terminal_os_version = None;
+            cleared.push(name.clone());
+        }
+        cleared
+    }
+
     fn path() -> PathBuf {
         Path::new(STATE_DIR).join(STATE_FILE)
     }
@@ -152,5 +198,51 @@ impl State {
             .filter(|(_, state)| state.required)
             .map(|(name, _)| name.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExtensionState, Phase, State};
+
+    fn terminal_on(version: &str) -> ExtensionState {
+        ExtensionState {
+            required: true,
+            phase: Phase::Unrecoverable,
+            last_failure: Some("no usable ruleset".into()),
+            terminal_os_version: Some(version.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A node that gave up on an extension while running a bad image kept
+    /// refusing it after boot counting rolled the base back to a good one. The
+    /// extension was merged and working, but the gate failed anyway, so the
+    /// next legitimate update would have been reverted on a healthy image.
+    #[test]
+    fn a_refusal_does_not_survive_the_rollback_that_fixes_it() {
+        let mut state = State::default();
+        state
+            .extensions
+            .insert("watchtower".into(), terminal_on("0.1.45"));
+
+        assert_eq!(state.forget_stale_terminals("0.1.43"), vec!["watchtower"]);
+        let entry = &state.extensions["watchtower"];
+        assert_eq!(entry.phase, Phase::Idle);
+        assert!(entry.last_failure.is_none());
+        assert!(entry.required, "clearing a refusal must not unrequire it");
+    }
+
+    /// Still running the image that failed, so the refusal is what stops the
+    /// agent looping on an extension it has already proven it cannot fix.
+    #[test]
+    fn a_refusal_survives_a_reboot_onto_the_same_image() {
+        let mut state = State::default();
+        state
+            .extensions
+            .insert("watchtower".into(), terminal_on("0.1.45"));
+
+        assert!(state.forget_stale_terminals("0.1.45").is_empty());
+        assert_eq!(state.extensions["watchtower"].phase, Phase::Unrecoverable);
     }
 }

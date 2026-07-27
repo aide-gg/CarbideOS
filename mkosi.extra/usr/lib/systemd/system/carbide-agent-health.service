@@ -24,6 +24,18 @@ Before=boot-complete.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/carbide-agent health-gate
+# Withholding the blessing only decides the fate of a boot that happens; it
+# does not cause one. Without this a node that came up on a bad image sat
+# there failing its gate forever, degraded but running, and the counter never
+# reached zero because nothing ever rebooted it. The rollback worked and was
+# never reached.
+#
+# This cannot loop: the entry that triggers it is a counted one, every reboot
+# spends a try, and at zero systemd-boot stops considering it and the previous
+# image comes back. A blessed entry does not run this unit at all, because
+# boot assessment is over by then, so a later failure cannot reboot a node
+# that has no counter left to spend.
+FailureAction=reboot
 # Recovery deliberately takes time: it restarts a service, waits for readiness
 # and then soaks it. This bound only matters when something is already wrong.
 TimeoutStartSec=900

@@ -75,6 +75,11 @@ Images live in /var/lib/extensions; only the active one ends in .raw."
 /// before recovery would trigger a rollback that could not possibly help.
 fn health_gate() -> Result<(), String> {
     let mut state = State::load().map_err(|error| error.to_string())?;
+    if let Some(version) = state::os_version() {
+        for name in state.forget_stale_terminals(&version) {
+            println!("{name}: clearing a refusal recorded under a previous image");
+        }
+    }
     let required = state.required();
 
     if required.is_empty() {
@@ -211,10 +216,14 @@ fn recover(state: &mut State, name: &str, reason: &str) -> Result<(), String> {
 }
 
 fn fail(state: &mut State, name: &str, reason: &str) {
+    let version = state::os_version();
     let entry = state.entry(name);
     entry.phase = Phase::Unrecoverable;
     entry.last_failure = Some(reason.to_string());
     entry.last_health = None;
+    // Stamped so a rollback onto a different base image can tell that this
+    // refusal belonged to the image that has since been replaced.
+    entry.terminal_os_version = version;
 }
 
 /// Promote a staged candidate, reverting if it does not prove itself.
