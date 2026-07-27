@@ -126,6 +126,17 @@ pub fn daemon_reload() -> io::Result<()> {
     Err(io::Error::other("daemon-reload failed"))
 }
 
+/// The extension name behind an image name, with any base version scope removed.
+///
+/// Mirrors how systemd derives a name from an image file: everything from the
+/// first underscore is the version.
+fn extension_name(image: &str) -> String {
+    match image.split_once('_') {
+        Some((name, _)) => name.to_string(),
+        None => image.to_string(),
+    }
+}
+
 pub fn merged_extensions() -> io::Result<Vec<String>> {
     let output = run("/usr/bin/systemd-sysext", &["status", "--json=short"])?;
     if !output.status.success() {
@@ -140,10 +151,15 @@ pub fn merged_extensions() -> io::Result<Vec<String>> {
         for entry in entries {
             if let Some(extensions) = entry.get("extensions").and_then(|e| e.as_array()) {
                 for extension in extensions {
-                    if let Some(name) = extension.as_str()
-                        && !names.iter().any(|n| n == name)
+                    // Reported under the image's file name, which carries the
+                    // base version the image is scoped to. Callers ask about
+                    // the extension, so the scope is stripped back off here;
+                    // otherwise a scoped image looks like an extension nobody
+                    // required and the one that was required looks missing.
+                    if let Some(name) = extension.as_str().map(extension_name)
+                        && !names.iter().any(|n| n == &name)
                     {
-                        names.push(name.to_string());
+                        names.push(name);
                     }
                 }
             }
@@ -297,4 +313,25 @@ pub fn install_active(source: &Path, name: &str) -> io::Result<()> {
     }
     std::fs::File::open(EXTENSIONS_DIR)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extension_name;
+
+    /// systemd reports a merged extension under its image file name. A scoped
+    /// image therefore arrives as `watchtower_0.1.50`, and comparing that to
+    /// the required name made a merged extension look missing, which failed
+    /// the gate and rolled a perfectly good image back.
+    #[test]
+    fn a_scoped_image_reports_the_extension_it_contains() {
+        assert_eq!(extension_name("watchtower_0.1.50"), "watchtower");
+        assert_eq!(extension_name("chrome_0.1.50"), "chrome");
+    }
+
+    #[test]
+    fn an_unscoped_image_is_left_alone() {
+        assert_eq!(extension_name("watchtower"), "watchtower");
+        assert_eq!(extension_name("rat-game-16"), "rat-game-16");
+    }
 }
