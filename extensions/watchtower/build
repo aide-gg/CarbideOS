@@ -40,6 +40,16 @@ case "$variant" in
         ;;
 esac
 
+# The image signing key and the ACE release verification key are independent.
+# A development node testing against production ACE releases needs a
+# development-signed image that nonetheless trusts the production release key,
+# because the base image will only merge an extension signed by its own trust
+# set while the releases themselves are signed in production CI.
+if [ -n "${CARBIDEOS_ACE_RELEASE_PUBLIC_KEY:-}" ]; then
+    release_pub=$CARBIDEOS_ACE_RELEASE_PUBLIC_KEY
+    printf 'Trusting ACE releases signed by %s\n' "$release_pub"
+fi
+
 for command in cargo curl gpg mkfs.erofs openssl sha256sum systemd-repart unzip; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'Missing required command: %s\n' "$command" >&2
