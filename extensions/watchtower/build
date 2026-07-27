@@ -36,7 +36,12 @@ case "$variant" in
         output="$PWD/dist/extensions/watchtower"
         signing_key=keys/secureboot/secure-boot.key
         signing_cert=keys/secureboot/secure-boot.crt
-        release_pub=keys/manifest/release-signing.pub.asc
+        # ACE releases are only ever signed by production CI, so trusting the
+        # development release key here would leave a development node unable to
+        # run any release at all. The image itself is still development signed;
+        # this only governs which ACE releases it will accept.
+        release_pub=keys/production/manifest/release-signing.pub.asc
+        [ -s "$release_pub" ] || release_pub=keys/manifest/release-signing.pub.asc
         ;;
 esac
 
