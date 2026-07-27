@@ -25,6 +25,33 @@ usage() {
     exit 2
 }
 
+# The base version an extension image declares it was built for.
+#
+# Read from the image rather than taken from the caller, because this decides
+# the file name the image is stored under and therefore which base merges it.
+image_base_version() {
+    # Anchored on the opening quote, because SYSEXT_VERSION_ID ends in the same
+    # text and an unanchored match also finds the extension's own version. That
+    # would pin the image to a base version that does not exist, and nothing
+    # would ever merge it.
+    /usr/bin/systemd-dissect --json=short "$1" 2>/dev/null \
+        | /usr/bin/grep -o '"sysextRelease":\[[^]]*\]' \
+        | /usr/bin/grep -o '"VERSION_ID=[^"]*' \
+        | /usr/bin/head -1 \
+        | /usr/bin/cut -d= -f2
+}
+
+# Only a plain version may be interpolated into a path.
+version_valid() {
+    printf '%s' "$1" | /usr/bin/grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+}
+
+running_base_version() {
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    printf '%s' "$VERSION_ID"
+}
+
 # A job identifier, and nothing else, may be interpolated into a unit name.
 # Without this an operator could name any unit on the system and this would stop
 # it or read its journal.
@@ -195,32 +222,57 @@ case "$operation" in
         }
         policy=root=verity+signed+absent:usr=verity+signed+absent
         /usr/bin/install -d -m 0755 /var/lib/extensions
-        target="/var/lib/extensions/$1.raw"
         staging="/var/lib/extensions/.$1.staging"
+        /usr/bin/head -c 1073741824 >"$staging"
+        [ -s "$staging" ] || {
+            /usr/bin/rm -f "$staging"
+            printf 'Refusing to install an empty extension image\n' >&2
+            exit 1
+        }
+        # The image is stored under the base version it declares, so images for
+        # the running base and for a pending one can sit here together and
+        # systemd merges whichever matches. That is what makes a base update
+        # survivable: the outgoing base keeps its extension, and a rollback
+        # finds it still in place.
+        image_version=$(image_base_version "$staging")
+        if ! version_valid "$image_version"; then
+            /usr/bin/rm -f "$staging"
+            printf 'Extension %s declares no usable base version\n' "$1" >&2
+            exit 1
+        fi
+        running=$(running_base_version)
+        target="/var/lib/extensions/$1-$image_version.raw"
         previous=
         if [ -f "$target" ]; then
             previous="/var/lib/extensions/.$1.previous"
             /usr/bin/cp -f "$target" "$previous"
         fi
-        /usr/bin/head -c 1073741824 >"$staging"
-        [ -s "$staging" ] || {
-            /usr/bin/rm -f "$staging" "$previous"
-            printf 'Refusing to install an empty extension image\n' >&2
-            exit 1
-        }
         /usr/bin/chmod 0644 "$staging"
         /usr/bin/mv -f "$staging" "$target"
-        # A refresh exits zero even when it silently skips an image whose
-        # extension-release does not match the running base, so its status
-        # alone would report success for an extension that never merged. The
-        # merged tree is the only honest evidence.
+        # An unscoped image predates scoping. It merges into whatever base it
+        # was built for, so leaving one that targets the same base as this
+        # image would merge two copies of the extension at once.
+        legacy="/var/lib/extensions/$1.raw"
+        if [ -f "$legacy" ] && [ "$(image_base_version "$legacy")" = "$image_version" ]; then
+            /usr/bin/rm -f "$legacy"
+        fi
+        # An image built for a base that is not running is staged, not broken:
+        # it merges when that base boots. Only an image for the running base is
+        # expected to merge now.
+        #
+        # A refresh exits zero even when it silently skips a mismatched image,
+        # so its status alone would report success for an extension that never
+        # merged. For the running base the merged tree is the only honest
+        # evidence.
         merged_ok=0
         if /usr/bin/env -i PATH="$PATH" \
             /usr/bin/systemd-sysext --image-policy="$policy" refresh; then
             # Written as a plain if, because an && list that fails here is the
             # last command in this branch and set -e would abort the script
             # before the image below could be rolled back.
-            if [ -f "/usr/lib/extension-release.d/extension-release.$1" ]; then
+            if [ "$image_version" != "$running" ]; then
+                merged_ok=1
+            elif [ -f "/usr/lib/extension-release.d/extension-release.$1" ]; then
                 merged_ok=1
             fi
         fi
@@ -228,12 +280,29 @@ case "$operation" in
             /usr/bin/rm -f "$previous"
             # A refresh does not restart a service that is already running, so
             # it would keep executing the previous image until something else
-            # restarted it.
-            if /usr/bin/systemctl list-unit-files watchtower.service >/dev/null 2>&1; then
+            # restarted it. Only worth doing when something actually changed
+            # under it; a staged image has not been merged and restarting for
+            # it would interrupt a healthy supervisor for no reason.
+            if [ "$image_version" = "$running" ] && \
+               /usr/bin/systemctl list-unit-files watchtower.service >/dev/null 2>&1; then
                 /usr/bin/env -i PATH="$PATH" \
                     /usr/bin/systemctl restart watchtower.service || true
             fi
-            printf 'extension %s installed\n' "$1"
+            # Keep the running base's image and one neighbour, so a rollback
+            # still finds its extension while the state partition stays bounded.
+            # These are hundreds of megabytes each.
+            for stale in $(/usr/bin/ls -1 "/var/lib/extensions/$1-"*.raw 2>/dev/null \
+                | /usr/bin/sed "s|.*/$1-||;s|\.raw$||" \
+                | /usr/bin/sort -V | /usr/bin/head -n -2); do
+                if [ "$stale" != "$running" ]; then
+                    /usr/bin/rm -f "/var/lib/extensions/$1-$stale.raw"
+                fi
+            done
+            if [ "$image_version" = "$running" ]; then
+                printf 'extension %s installed\n' "$1"
+            else
+                printf 'extension %s staged for CarbideOS %s\n' "$1" "$image_version"
+            fi
         else
             if [ -n "$previous" ]; then
                 /usr/bin/mv -f "$previous" "$target"

@@ -24,18 +24,50 @@ const IMAGE_POLICY: &str = "root=verity+signed+absent:usr=verity+signed+absent";
 /// Slot naming.
 ///
 /// `systemd-sysext` merges every `*.raw` in the extensions directory, so only
-/// the active image may carry that suffix. A retained image whose name ended
-/// in `.raw` would be merged at the same time as the active one.
-pub fn active_path(name: &str) -> PathBuf {
+/// an image meant to merge may carry that suffix. A retained image whose name
+/// ended in `.raw` would be merged at the same time as the active one.
+///
+/// The active image is additionally scoped to the base version it was built
+/// for. This directory lives on the state partition and so is shared by both
+/// base slots, while `/usr` is replaced wholesale by an update. With a single
+/// unscoped file there is one image for two base versions, and no ordering
+/// works: replacing it breaks the running system, and leaving it means the new
+/// base boots to an extension it must refuse. Scoping lets both sit here at
+/// once, lets systemd merge whichever matches, and leaves a base rollback with
+/// its own extension already in place.
+fn scope() -> String {
+    crate::state::os_version().unwrap_or_else(|| "unknown".to_string())
+}
+
+fn legacy_active_path(name: &str) -> PathBuf {
     Path::new(EXTENSIONS_DIR).join(format!("{name}.raw"))
 }
 
+pub fn scoped_active_path(name: &str, os_version: &str) -> PathBuf {
+    Path::new(EXTENSIONS_DIR).join(format!("{name}-{os_version}.raw"))
+}
+
+pub fn active_path(name: &str) -> PathBuf {
+    let scoped = scoped_active_path(name, &scope());
+    if scoped.exists() {
+        return scoped;
+    }
+    // A node provisioned before scoping carries an unscoped image, which is by
+    // definition the one merged into the running base. Keep reading it until
+    // something installs a scoped one, so an upgrade cannot strand a node.
+    let legacy = legacy_active_path(name);
+    if legacy.exists() {
+        return legacy;
+    }
+    scoped
+}
+
 pub fn rollback_path(name: &str, version: &str) -> PathBuf {
-    Path::new(EXTENSIONS_DIR).join(format!("{name}.raw.{version}.rollback"))
+    Path::new(EXTENSIONS_DIR).join(format!("{name}-{}.raw.{version}.rollback", scope()))
 }
 
 pub fn candidate_path(name: &str, version: &str) -> PathBuf {
-    Path::new(EXTENSIONS_DIR).join(format!("{name}.raw.{version}.candidate"))
+    Path::new(EXTENSIONS_DIR).join(format!("{name}-{}.raw.{version}.candidate", scope()))
 }
 
 /// Bytes available on the filesystem backing the extensions directory.
@@ -248,9 +280,16 @@ pub fn soak(ruleset: &Ruleset) -> Result<(), String> {
 /// Replace the active image, flushing the directory so the swap is durable
 /// before anything is merged from it.
 pub fn install_active(source: &Path, name: &str) -> io::Result<()> {
-    let target = active_path(name);
+    // Always writes the scoped name, even when a legacy image is still what
+    // active_path reads, so that activating anything migrates the node.
+    let target = scoped_active_path(name, &scope());
     fs::copy(source, &target)?;
     fs::set_permissions(&target, fs::metadata(source)?.permissions())?;
+    // Both would otherwise merge at once, giving two copies of one extension.
+    let legacy = legacy_active_path(name);
+    if legacy != target && legacy.exists() {
+        fs::remove_file(&legacy)?;
+    }
     std::fs::File::open(EXTENSIONS_DIR)?.sync_all()?;
     Ok(())
 }
