@@ -14,8 +14,31 @@ unset CDPATH ENV BASH_ENV GPG_TTY SSH_AUTH_SOCK
 usage() {
     printf '%s\n' \
         'Usage: carbideos-ops health|logs|reboot|poweroff|update' \
-        '       carbideos-ops extension install|remove rat-game-16' >&2
+        '       carbideos-ops extension install|remove rat-game-16' \
+        '       carbideos-ops node-id' \
+        '       carbideos-ops credential NAME        (value on stdin)' \
+        '       carbideos-ops install-extension NAME (image on stdin)' >&2
     exit 2
+}
+
+# Credentials a node may be given during provisioning. Restricting the names is
+# what keeps this from being an arbitrary write into the credential store.
+credential_permitted() {
+    case "$1" in
+        GITHUB_TOKEN|REDIS_URL|ABLY_API_KEY|GCP_KMS_CREDENTIALS_B64) return 0 ;;
+        OPENAI_API_KEY|OPENROUTER_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY) return 0 ;;
+        CONVEX_SERVER_SECRET_DEV|CONVEX_SERVER_SECRET_PROD) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Extensions a node may be given directly. Watchtower is deliberately not
+# published to the update feed, so it can only arrive this way.
+extension_permitted() {
+    case "$1" in
+        watchtower|chrome|rat-game-16) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 [ "$#" -ge 1 ] || usage
@@ -65,6 +88,92 @@ case "$operation" in
                 exit 1
             fi
             /usr/bin/bootctl set-oneshot "$(basename "$1")"
+        fi
+        ;;
+    node-id)
+        # Read-only, and not a secret: the node publishes this to the fleet in
+        # its hello. Provisioning needs it to address the node afterwards.
+        [ "$#" -eq 0 ] || usage
+        [ -s /var/lib/watchtower/node-id ] || {
+            printf 'This node has no identity yet\n' >&2
+            exit 1
+        }
+        exec /usr/bin/cat /var/lib/watchtower/node-id
+        ;;
+    credential)
+        # Provisioning writes per-node secrets that are deliberately not
+        # compiled into the image, the release token above all. The value
+        # arrives on stdin so it never reaches the process table or the
+        # operator's shell history.
+        [ "$#" -eq 1 ] || usage
+        credential_permitted "$1" || {
+            printf 'Refusing to write credential %s\n' "$1" >&2
+            exit 2
+        }
+        directory=/var/lib/watchtower/credentials
+        /usr/bin/install -d -m 0700 -o root -g root "$directory"
+        staging="$directory/.$1.staging"
+        /usr/bin/head -c 65536 >"$staging"
+        [ -s "$staging" ] || {
+            /usr/bin/rm -f "$staging"
+            printf 'Refusing to write an empty credential %s\n' "$1" >&2
+            exit 1
+        }
+        /usr/bin/chmod 0600 "$staging"
+        /usr/bin/mv -f "$staging" "$directory/$1"
+        printf 'credential %s installed\n' "$1"
+        ;;
+    install-extension)
+        # A signed extension image supplied directly rather than fetched from
+        # the update feed. Watchtower is never published to the feed, so this is
+        # the only way it can reach a node.
+        #
+        # The image is not trusted because it arrived here: the merge below
+        # enforces verity and a signature made by a key in the sealed base
+        # image, and an image that fails is removed again.
+        [ "$#" -eq 1 ] || usage
+        extension_permitted "$1" || {
+            printf 'Refusing to install extension %s\n' "$1" >&2
+            exit 2
+        }
+        policy=root=verity+signed+absent:usr=verity+signed+absent
+        /usr/bin/install -d -m 0755 /var/lib/extensions
+        target="/var/lib/extensions/$1.raw"
+        staging="/var/lib/extensions/.$1.staging"
+        previous=
+        if [ -f "$target" ]; then
+            previous="/var/lib/extensions/.$1.previous"
+            /usr/bin/cp -f "$target" "$previous"
+        fi
+        /usr/bin/head -c 1073741824 >"$staging"
+        [ -s "$staging" ] || {
+            /usr/bin/rm -f "$staging" "$previous"
+            printf 'Refusing to install an empty extension image\n' >&2
+            exit 1
+        }
+        /usr/bin/chmod 0644 "$staging"
+        /usr/bin/mv -f "$staging" "$target"
+        if /usr/bin/env -i PATH="$PATH" \
+            /usr/bin/systemd-sysext --image-policy="$policy" refresh; then
+            /usr/bin/rm -f "$previous"
+            # A refresh does not restart a service that is already running, so
+            # it would keep executing the previous image until something else
+            # restarted it.
+            if /usr/bin/systemctl list-unit-files watchtower.service >/dev/null 2>&1; then
+                /usr/bin/env -i PATH="$PATH" \
+                    /usr/bin/systemctl restart watchtower.service || true
+            fi
+            printf 'extension %s installed\n' "$1"
+        else
+            if [ -n "$previous" ]; then
+                /usr/bin/mv -f "$previous" "$target"
+            else
+                /usr/bin/rm -f "$target"
+            fi
+            /usr/bin/env -i PATH="$PATH" \
+                /usr/bin/systemd-sysext --image-policy="$policy" refresh || true
+            printf 'Extension %s was rejected and has been removed\n' "$1" >&2
+            exit 1
         fi
         ;;
     extension)

@@ -53,7 +53,7 @@ while [ "$#" -gt 0 ]; do
         --pool) pool=${2:?}; shift 2 ;;
         --yes) assume_yes=1; shift ;;
         --no-enroll) enroll=0; shift ;;
-        --credentials|--github-token|--extension|--ssh-user|--ssh-key|--password)
+        --credentials|--github-token|--extension|--ssh-user|--ssh-key)
             enroll_args="$enroll_args $1 ${2:?}"; shift 2 ;;
         -*) usage ;;
         *)
@@ -112,6 +112,15 @@ api() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
+# Name the uploaded artifact after the image, not after the temporary file it
+# may be decompressed into, so distinct images cannot overwrite one another in
+# the import storage.
+artifact=$(basename "$image" .zst)
+case "$artifact" in
+    *.raw) ;;
+    *) artifact="$artifact.raw" ;;
+esac
+
 # The import storage holds raw disks, so a compressed image is expanded first.
 case "$image" in
     *.zst)
@@ -125,11 +134,6 @@ case "$image" in
         ;;
 esac
 
-artifact=$(basename "$image")
-case "$artifact" in
-    *.raw) ;;
-    *) artifact="$artifact.raw" ;;
-esac
 volume="$import_storage:import/$artifact"
 
 exists=0
@@ -158,6 +162,10 @@ if [ "$exists" -eq 0 ]; then
     # Matches the other Carbide nodes: q35 with OVMF so the signed boot chain
     # works, virtio-scsi-single for per-disk iothreads, and a guest agent so the
     # host can report the address.
+    #
+    # The TPM is not optional. System state, workload state and swap are all
+    # created with Encrypt=tpm2, so without one systemd-repart has nothing to
+    # seal against, first boot fails, and the node drops to emergency mode.
     upid=$(api POST "$base/nodes/$node/qemu" \
         --data-urlencode "vmid=$vmid" \
         --data-urlencode "name=$name" \
@@ -174,6 +182,7 @@ if [ "$exists" -eq 0 ]; then
         --data-urlencode "scsihw=virtio-scsi-single" \
         --data-urlencode "net0=virtio,bridge=$bridge,firewall=1" \
         --data-urlencode "efidisk0=$efi_storage:0,efitype=4m,pre-enrolled-keys=0" \
+        --data-urlencode "tpmstate0=$efi_storage:1,version=v2.0" \
         | jq -r '.data // empty')
     [ -z "$upid" ] || ./scripts/proxmox-wait-task "$upid" 300
 else
