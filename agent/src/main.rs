@@ -138,6 +138,9 @@ fn verify_or_recover(state: &mut State, name: &str, merged: &[String]) -> Result
 
     let entry = state.entry(name);
     entry.phase = Phase::Active;
+    // Proven working, so a refusal recorded under some earlier image is no
+    // longer describing anything.
+    entry.terminal_os_version = None;
     entry.last_health = Some("healthy".into());
     entry.last_failure = None;
     Ok(())
@@ -319,6 +322,9 @@ fn activate(arguments: &[String]) -> Result<(), String> {
     {
         let entry = state.entry(name);
         entry.phase = Phase::Active;
+    // Proven working, so a refusal recorded under some earlier image is no
+    // longer describing anything.
+    entry.terminal_os_version = None;
         entry.active_version = Some(version.clone());
         entry.candidate_version = None;
         entry.last_health = Some("healthy".into());
