@@ -31,6 +31,22 @@ fi
 # stamped with someone else's version: a fleet build once came out as 0.1.46
 # because a development version was mid-flight. Naming the version explicitly
 # makes a build independent of the tree's current state.
+# One build at a time. mkosi resolves the image version from mkosi.version and
+# honours no override, so the file is the only way to name a version and two
+# builds sharing this checkout will label each other's images. A fleet build
+# came out stamped 0.1.46 that way, while a development version was mid-flight.
+# Held by the unprivileged half only. This script re-executes itself under
+# sudo, and sudo does not carry the descriptor across, so taking the lock on
+# both halves would make every build wait on itself.
+if [ "$(id -u)" -ne 0 ]; then
+    exec 9>.mkosi-build.lock
+    if ! flock --exclusive --nonblock 9; then
+        printf '%s\n' 'Another CarbideOS build is running in this checkout.' >&2
+        printf '%s\n' 'Wait for it to finish: they share mkosi.version.' >&2
+        exit 1
+    fi
+fi
+
 version=${CARBIDEOS_VERSION:-$(tr -d '[:space:]' <mkosi.version)}
 case "$version" in
     '' | *[!A-Za-z0-9._-]*)
@@ -38,7 +54,13 @@ case "$version" in
         exit 1
         ;;
 esac
-printf 'Building CarbideOS %s (%s)\n' "$version" "$variant"
+# Kept in step deliberately, because mkosi reads this file rather than anything
+# passed to it, so a version named on the command line has to land here to have
+# any effect at all.
+if [ "$(id -u)" -ne 0 ]; then
+    printf '%s\n' "$version" >mkosi.version
+    printf 'Building CarbideOS %s (%s)\n' "$version" "$variant"
+fi
 
 case "$variant" in
     fleet)
@@ -257,7 +279,7 @@ fi
 
 if [ "$variant" = debug ]; then
     printf '%s\n' 'Building CarbideOS debug image with root password enabled.'
-    mkosi --extra-tree="$extra" --image-version="$version" \
+    mkosi --extra-tree="$extra" \
         --output=carbideos-debug --hostname=carbideos-debug \
         --unified-kernel-image-format="carbideos-debug_${version}" \
         --environment=CARBIDEOS_VARIANT=debug build
@@ -279,7 +301,7 @@ fi
 
 if [ "$variant" = fleet ]; then
     printf '%s\n' 'Building CarbideOS fleet image with production trust.'
-    mkosi --extra-tree="$extra" --image-version="$version" \
+    mkosi --extra-tree="$extra" \
         --output="$output" --image-id=carbideos-fleet --hostname=carbideos \
         --unified-kernel-image-format="carbideos-fleet_${version}" \
         --environment=CARBIDEOS_VARIANT=fleet \
@@ -289,7 +311,7 @@ if [ "$variant" = fleet ]; then
         --verity-certificate="$verity_cert" build
 elif [ "$variant" = playground ]; then
     printf '%s\n' 'Building CarbideOS Playground image with isolated trust.'
-    mkosi --extra-tree="$extra" --image-version="$version" \
+    mkosi --extra-tree="$extra" \
         --output="$output" --image-id=carbideos-playground \
         --hostname=carbideos-playground \
         --unified-kernel-image-format="carbideos-playground_${version}" \
@@ -299,7 +321,7 @@ elif [ "$variant" = playground ]; then
         --verity-key="$verity_key" \
         --verity-certificate="$verity_cert" build
 else
-    mkosi --extra-tree="$extra" --image-version="$version" \
+    mkosi --extra-tree="$extra" \
         --unified-kernel-image-format="carbideos_${version}" \
         --environment=CARBIDEOS_VARIANT=development build
 fi

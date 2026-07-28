@@ -36,3 +36,4 @@
 *.swo
 *~
 .DS_Store
+/.mkosi-build.lock
