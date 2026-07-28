@@ -19,6 +19,8 @@ usage() {
         '       carbideos-ops logs job ID            one ACE job, all priorities' \
         '       carbideos-ops stop-job ID' \
         '       carbideos-ops extension install|remove rat-game-16' \
+        '       carbideos-ops agent status' \
+        '       carbideos-ops agent require|unrequire|reset NAME' \
         '       carbideos-ops node-id' \
         '       carbideos-ops credential NAME        (value on stdin)' \
         '       carbideos-ops install-extension NAME (image on stdin)' >&2
@@ -328,6 +330,30 @@ case "$operation" in
             printf 'It is signed for a different CarbideOS version, or its verity signature was refused.\n' >&2
             exit 1
         fi
+        ;;
+    agent)
+        # The recovery component's own controls. Without these a fleet node
+        # that gave up on an extension could not be told to try again, because
+        # nothing here reaches carbide-agent and nothing else may run as root:
+        # the only remaining move was to reprovision a node whose disk was
+        # fine. Reading state is unrestricted; the rest name an extension, and
+        # only one this node is allowed to carry.
+        case "${1-}" in
+            status)
+                [ "$#" -eq 1 ] || usage
+                exec /usr/bin/env -i PATH="$PATH" /usr/bin/carbide-agent status
+                ;;
+            require|unrequire|reset)
+                [ "$#" -eq 2 ] || usage
+                extension_permitted "$2" || {
+                    printf 'Refusing to %s extension %s\n' "$1" "$2" >&2
+                    exit 2
+                }
+                exec /usr/bin/env -i PATH="$PATH" \
+                    /usr/bin/carbide-agent "$1" "$2"
+                ;;
+            *) usage ;;
+        esac
         ;;
     extension)
         [ "$#" -eq 2 ] || usage
