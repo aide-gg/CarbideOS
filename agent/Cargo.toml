@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 [package]
 name = "carbide-agent"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "CarbideOS system extension supervisor and recovery component"
 license = "AGPL-3.0-or-later"

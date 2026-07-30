@@ -13,7 +13,7 @@ unset CDPATH ENV BASH_ENV GPG_TTY SSH_AUTH_SOCK
 
 usage() {
     printf '%s\n' \
-        'Usage: carbideos-ops health|reboot|poweroff|update' \
+        'Usage: carbideos-ops health|reboot|poweroff|update [VERSION]' \
         '       carbideos-ops logs                   system warnings this boot' \
         '       carbideos-ops logs watchtower        the supervisor, all priorities' \
         '       carbideos-ops logs job ID            one ACE job, all priorities' \
@@ -43,6 +43,14 @@ image_base_version() {
         | /usr/bin/cut -d= -f2
 }
 
+image_extension_version() {
+    /usr/bin/systemd-dissect --json=short "$1" 2>/dev/null \
+        | /usr/bin/grep -o '"sysextRelease":\[[^]]*\]' \
+        | /usr/bin/grep -o '"SYSEXT_VERSION_ID=[^"]*' \
+        | /usr/bin/head -1 \
+        | /usr/bin/cut -d= -f2
+}
+
 # Only a plain version may be interpolated into a path.
 version_valid() {
     printf '%s' "$1" | /usr/bin/grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'
@@ -52,6 +60,33 @@ running_base_version() {
     # shellcheck disable=SC1091
     . /etc/os-release
     printf '%s' "$VERSION_ID"
+}
+
+pending_base_version() {
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    set -- "/boot/EFI/Linux/${IMAGE_ID}_"*+*-*.efi
+    if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+        printf '%s\n' 'Expected exactly one pending counted UKI.' >&2
+        return 1
+    fi
+    pending=${1##*/}
+    pending=${pending#"${IMAGE_ID}_"}
+    printf '%s' "${pending%%+*}"
+}
+
+require_pending_watchtower() {
+    running=$(running_base_version)
+    if [ ! -f "/var/lib/extensions/watchtower_$running.raw" ] && \
+       [ ! -f /var/lib/extensions/watchtower.raw ]; then
+        return 0
+    fi
+    pending=$(pending_base_version) || return 1
+    [ -f "/var/lib/extensions/watchtower_$pending.raw" ] || {
+        printf 'Watchtower is installed, but no image is staged for CarbideOS %s\n' \
+            "$pending" >&2
+        return 1
+    }
 }
 
 # A job identifier, and nothing else, may be interpolated into a unit name.
@@ -150,6 +185,7 @@ case "$operation" in
     reboot)
         [ "$#" -eq 0 ] || usage
         if /usr/lib/systemd/systemd-sysupdate pending; then
+            require_pending_watchtower
             exec /usr/bin/env -i PATH="$PATH" \
                 /usr/lib/systemd/systemd-sysupdate reboot
         fi
@@ -160,20 +196,21 @@ case "$operation" in
         exec /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl poweroff
         ;;
     update)
-        [ "$#" -eq 0 ] || usage
+        [ "$#" -le 1 ] || usage
+        if [ "$#" -eq 1 ] && ! version_valid "$1"; then
+            printf 'Invalid CarbideOS version: %s\n' "$1" >&2
+            exit 2
+        fi
         /usr/bin/env -i PATH="$PATH" \
-            /usr/lib/systemd/systemd-sysupdate update
+            /usr/lib/systemd/systemd-sysupdate update "$@"
         /usr/bin/sync
         if /usr/lib/systemd/systemd-sysupdate pending; then
+            require_pending_watchtower
+            # pending_base_version also proved there is exactly one candidate.
             # shellcheck disable=SC1091
             . /etc/os-release
             set -- "/boot/EFI/Linux/${IMAGE_ID}_"*+*-*.efi
-            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-                printf '%s\n' \
-                    'Expected exactly one pending counted UKI.' >&2
-                exit 1
-            fi
-            /usr/bin/bootctl set-oneshot "$(basename "$1")"
+            /usr/bin/bootctl set-oneshot "${1##*/}"
         fi
         ;;
     node-id)
@@ -239,6 +276,12 @@ case "$operation" in
             printf 'Refusing to install an empty extension image\n' >&2
             exit 1
         }
+        if ! /usr/bin/systemd-dissect --validate \
+             --image-policy="$policy" "$staging" >/dev/null; then
+            /usr/bin/rm -f "$staging"
+            printf 'Extension %s failed signed image validation\n' "$1" >&2
+            exit 1
+        fi
         # The image is stored under the base version it declares, so images for
         # the running base and for a pending one can sit here together and
         # systemd merges whichever matches. That is what makes a base update
@@ -252,6 +295,33 @@ case "$operation" in
         fi
         trap '/usr/bin/rm -f "$staging"' EXIT HUP INT TERM
         running=$(running_base_version)
+        extension_version=$(image_extension_version "$staging")
+        if ! version_valid "$extension_version"; then
+            printf 'Extension %s declares no usable extension version\n' "$1" >&2
+            exit 1
+        fi
+        if [ "$1" = watchtower ] && [ "$image_version" = "$running" ]; then
+            current_version=
+            if [ -r /usr/lib/extension-release.d/extension-release.watchtower ]; then
+                current_version=$(/usr/bin/sed -n \
+                    's/^SYSEXT_VERSION_ID=//p' \
+                    /usr/lib/extension-release.d/extension-release.watchtower \
+                    | /usr/bin/head -1)
+            fi
+            if version_valid "$current_version" && {
+                [ -f "/var/lib/extensions/watchtower_$running.raw" ] ||
+                    [ -f /var/lib/extensions/watchtower.raw ]
+            }; then
+                /usr/libexec/carbide-agent adopt watchtower "$current_version"
+            fi
+            candidate="/var/lib/extensions/watchtower_$running.raw.$extension_version.candidate"
+            /usr/bin/chmod 0644 "$staging"
+            /usr/bin/mv -f "$staging" "$candidate"
+            request_id=$(/usr/bin/cat /proc/sys/kernel/random/uuid)
+            /usr/libexec/carbide-agent activate watchtower "$extension_version" "$request_id"
+            printf 'extension watchtower installed\n'
+            exit 0
+        fi
         # An underscore, because systemd strips a version from an image name
         # only after that separator. With any other one it looks for an
         # extension-release named after the whole string, does not find it, and

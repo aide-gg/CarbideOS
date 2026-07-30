@@ -1,0 +1,10 @@
+[Unit]
+Description=Install a signed Watchtower system extension
+RequiresMountsFor=/var/lib/watchtower /var/lib/extensions
+ConditionPathExists=/var/lib/watchtower/watchtower-update.raw
+
+[Service]
+Type=oneshot
+StandardInput=file:/var/lib/watchtower/watchtower-update.raw
+ExecStart=/usr/sbin/carbideos-ops install-extension watchtower
+ExecStopPost=/usr/bin/rm -f /var/lib/watchtower/watchtower-update.raw

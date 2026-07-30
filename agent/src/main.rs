@@ -27,6 +27,7 @@ fn main() -> ExitCode {
     let result = match command {
         "health-gate" => health_gate(),
         "activate" => activate(&arguments[1..]),
+        "adopt" => adopt(&arguments[1..]),
         "rollback" => rollback_command(&arguments[1..]),
         "require" => set_required(&arguments[1..], true),
         "unrequire" => set_required(&arguments[1..], false),
@@ -55,6 +56,7 @@ Usage: carbide-agent COMMAND
 
   health-gate              Verify every required extension is healthy
   activate NAME VERSION    Activate a staged candidate, reverting on failure
+  adopt NAME VERSION       Record an already-active, healthy image as known-good
   rollback NAME            Return an extension to its known-good image
   require NAME             Record that this node must have NAME
   unrequire NAME           Stop requiring NAME
@@ -64,6 +66,43 @@ Usage: carbide-agent COMMAND
 Rulesets are read only from /usr/lib/carbide/health.d.
 Images live in /var/lib/extensions; only the active one ends in .raw."
     );
+}
+
+/// Bring an image installed before the agent under supervision without
+/// replacing it. This is primarily the migration path for fleet nodes whose
+/// first Watchtower sysext predates candidate activation.
+fn adopt(arguments: &[String]) -> Result<(), String> {
+    let name = arguments
+        .first()
+        .ok_or("usage: carbide-agent adopt NAME VERSION")?;
+    let version = arguments
+        .get(1)
+        .ok_or("usage: carbide-agent adopt NAME VERSION")?;
+    let active = system::active_path(name);
+    if !active.exists() {
+        return Err(format!("no active image at {}", active.display()));
+    }
+
+    let ruleset = Ruleset::load_named(name)
+        .map_err(|error| format!("active image has no usable ruleset: {error}"))?;
+    healthy_now(&ruleset)?;
+
+    let retained = system::rollback_path(name, version);
+    if !retained.exists() {
+        std::fs::copy(&active, &retained).map_err(|error| error.to_string())?;
+    }
+    let mut state = State::load().map_err(|error| error.to_string())?;
+    let entry = state.entry(name);
+    entry.required = true;
+    entry.active_version = Some(version.clone());
+    entry.known_good_version = Some(version.clone());
+    entry.phase = Phase::Active;
+    entry.terminal_os_version = None;
+    entry.last_health = Some("healthy".into());
+    entry.last_failure = None;
+    state.store().map_err(|error| error.to_string())?;
+    println!("{name}: adopted active {version} as known-good");
+    Ok(())
 }
 
 /// Gate boot assessment on the node actually being able to do its job.
@@ -322,9 +361,9 @@ fn activate(arguments: &[String]) -> Result<(), String> {
     {
         let entry = state.entry(name);
         entry.phase = Phase::Active;
-    // Proven working, so a refusal recorded under some earlier image is no
-    // longer describing anything.
-    entry.terminal_os_version = None;
+        // Proven working, so a refusal recorded under some earlier image is no
+        // longer describing anything.
+        entry.terminal_os_version = None;
         entry.active_version = Some(version.clone());
         entry.candidate_version = None;
         entry.last_health = Some("healthy".into());

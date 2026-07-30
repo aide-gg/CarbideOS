@@ -206,6 +206,7 @@ The binary ships at `/usr/bin/carbide-agent` inside the sealed base image.
 ```
 carbide-agent health-gate              verify every required extension
 carbide-agent activate NAME VERSION    promote a staged candidate
+carbide-agent adopt NAME VERSION       supervise an already-active known-good image
 carbide-agent rollback NAME            return to the known-good image
 carbide-agent require NAME             record that this node must have NAME
 carbide-agent unrequire NAME           stop requiring NAME
