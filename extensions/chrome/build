@@ -17,8 +17,6 @@ case "${1-}" in
 esac
 
 version=${CARBIDEOS_EXTENSION_VERSION:-$(tr -d '[:space:]' <mkosi.version)}
-chrome_version=150.0.7871.186-1
-chrome_sha256=918565ec80808f179b9b768f173af200d9c97f0a424700a510084a8a593d2796
 chrome_url=https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
 google_key_url=https://dl.google.com/linux/linux_signing_key.pub
 
@@ -84,13 +82,6 @@ fi
 
 chrome_rpm="$work/google-chrome.rpm"
 curl -LfsS "$chrome_url" -o "$chrome_rpm"
-printf '%s  %s\n' "$chrome_sha256" "$chrome_rpm" | sha256sum -c -
-actual_version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$chrome_rpm")
-[ "$actual_version" = "$chrome_version" ] || {
-    printf 'Chrome version mismatch: expected %s, got %s\n' \
-        "$chrome_version" "$actual_version" >&2
-    exit 1
-}
 
 rpmdb="$work/rpmdb"
 install -d "$rpmdb" "$output"
@@ -98,6 +89,15 @@ curl -LfsS "$google_key_url" -o "$work/google-linux-signing-key.pub"
 rpm --dbpath "$rpmdb" --initdb
 rpmkeys --dbpath "$rpmdb" --import "$work/google-linux-signing-key.pub"
 rpmkeys --dbpath "$rpmdb" --checksig "$chrome_rpm" | grep -q 'digests signatures OK$'
+# Whatever Google currently ships, taken only after its signature checks out.
+# Pinning a version bought nothing here: the signature is what says the bytes
+# are Google's, and holding a browser back is worse than moving with it.
+chrome_version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$chrome_rpm")
+[ -n "$chrome_version" ] || {
+    printf '%s\n' 'Could not read the Chrome version from the package' >&2
+    exit 1
+}
+printf 'Chrome %s\n' "$chrome_version"
 
 project="$work/mkosi"
 install -d "$project"
