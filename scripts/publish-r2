@@ -172,7 +172,10 @@ replaced_total=0
 tab=$(printf '\t')
 while IFS="$tab" read -r relative size; do
     case "$relative" in
-        SHA256SUMS|SHA256SUMS.gpg|rat-game-16_*.sysext.raw)
+        # Extension images carry no channel in their name, so this cannot tell
+        # one channel's from another's. The manifest signature above already
+        # does, being made by a key only that channel holds.
+        SHA256SUMS|SHA256SUMS.gpg|*.sysext.raw)
             ;;
         *)
             case "$relative" in
