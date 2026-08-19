@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Answer privileged CarbideOS requests
+Documentation=man:systemd.service(5)
+Requires=carbide-agent-api.socket
+After=carbide-agent-api.socket
+RequiresMountsFor=/var/lib/extensions /var/lib/carbide
+ConditionPathExists=!/etc/initrd-release
+
+[Service]
+ExecStart=/usr/bin/carbide-agent serve
+# Deliberately unsandboxed where the callers are not. Resolving $BOOT needs the
+# block devices, which is exactly what a sandboxed caller cannot reach and why
+# this exists rather than each caller running sysupdate itself.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

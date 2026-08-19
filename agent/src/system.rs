@@ -102,6 +102,32 @@ fn run(program: &str, args: &[&str]) -> io::Result<std::process::Output> {
         .output()
 }
 
+const SYSUPDATE: &str = "/usr/lib/systemd/systemd-sysupdate";
+
+/// The base version the update feed offers, if it is newer than this one.
+///
+/// Runs here rather than in a caller because sysupdate has to resolve $BOOT,
+/// which needs the block devices a sandboxed service does not have.
+pub fn available_base_version() -> Result<Option<String>, String> {
+    let output = run(SYSUPDATE, &["check-new"])
+        .map_err(|error| format!("could not run systemd-sysupdate: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "systemd-sysupdate check-new failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!version.is_empty()).then_some(version))
+}
+
+/// Whether an update has been downloaded and is waiting for a reboot.
+pub fn update_pending() -> bool {
+    run(SYSUPDATE, &["pending"])
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 /// Re-merge extensions. The drop-in sets EXTENSION_RELOAD_MANAGER, so units
 /// arriving from an extension become visible without a separate reload.
 pub fn sysext_refresh() -> io::Result<()> {

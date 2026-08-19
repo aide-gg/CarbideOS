@@ -11,6 +11,7 @@
 //! switch between images already on disk, so it works on a node with no route
 //! to anywhere and no help from a provisioner.
 
+mod api;
 mod config;
 mod state;
 mod system;
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
         "unrequire" => set_required(&arguments[1..], false),
         "reset" => reset(&arguments[1..]),
         "status" => status(),
+        "serve" => api::serve(arguments.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
             usage();
             return ExitCode::SUCCESS;
@@ -62,6 +64,7 @@ Usage: carbide-agent COMMAND
   unrequire NAME           Stop requiring NAME
   reset NAME               Clear a terminal state so NAME is checked again
   status                   Report agent state as JSON
+  serve [PATH]             Answer requests on a socket, systemd's if PATH is absent
 
 Rulesets are read only from /usr/lib/carbide/health.d.
 Images live in /var/lib/extensions; only the active one ends in .raw."

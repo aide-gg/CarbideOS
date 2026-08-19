@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Socket for privileged CarbideOS operations
+Documentation=man:systemd.socket(5)
+
+[Socket]
+ListenStream=/run/carbide/agent.sock
+# Root only. Watchtower runs as root and is the intended caller; ACE jobs run
+# under DynamicUser and must not be able to drive base image updates.
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+# One connection is one request, so the service handles the listener itself
+# rather than being spawned per connection.
+Accept=no
+
+[Install]
+WantedBy=sockets.target
