@@ -17,7 +17,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 ./scripts/build --fleet
-./extensions/rat-game-16/build --fleet
+./extensions/chrome/build --fleet
 ./scripts/package --fleet
 ./scripts/sign --fleet
 ./scripts/verify --fleet

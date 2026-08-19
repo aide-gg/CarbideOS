@@ -10,16 +10,19 @@ name=$2
 # shellcheck disable=SC1091
 . /usr/lib/os-release
 case "$name" in
-    rat-game-16)
-        artifact="rat-game-16_277d18d-3_${IMAGE_VERSION}.sysext.raw"
-        ;;
+    chrome|rat-game-16) ;;
     *)
         printf 'Unknown extension: %s\n' "$name" >&2
         exit 1
         ;;
 esac
+# Watchtower is deliberately absent: it is not published to the feed and
+# arrives only through carbideos-ops install-extension.
+artifact="${name}_${VERSION_ID}.sysext.raw"
 
-target=/var/lib/extensions/$name.raw
+# Scoped to the base it was built for, matching install-extension, so an image
+# for the running base and one for a pending base can sit here together.
+target="/var/lib/extensions/${name}_${VERSION_ID}.raw"
 policy=root=verity+signed+absent:usr=verity+signed+absent
 case "$action" in
     install)
@@ -31,6 +34,9 @@ case "$action" in
             "https://updates.aide.gg/carbideos/$artifact" "$temporary"
         chmod 0644 "$temporary"
         mv -f "$temporary" "$target"
+        # An unscoped image predates scoping and merges alongside this one,
+        # leaving the node running two copies of the same extension.
+        rm -f "/var/lib/extensions/$name.raw"
         if ! systemd-sysext --image-policy="$policy" refresh; then
             rm -f "$target"
             systemd-sysext --image-policy="$policy" refresh || true
@@ -38,7 +44,7 @@ case "$action" in
         fi
         ;;
     remove)
-        rm -f "$target"
+        rm -f "$target" "/var/lib/extensions/$name.raw"
         systemd-sysext --image-policy="$policy" refresh
         ;;
     *)

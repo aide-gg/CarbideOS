@@ -18,7 +18,7 @@ usage() {
         '       carbideos-ops logs watchtower        the supervisor, all priorities' \
         '       carbideos-ops logs job ID            one ACE job, all priorities' \
         '       carbideos-ops stop-job ID' \
-        '       carbideos-ops extension install|remove rat-game-16' \
+        '       carbideos-ops extension install|remove chrome|rat-game-16' \
         '       carbideos-ops agent status' \
         '       carbideos-ops agent require|unrequire|reset NAME' \
         '       carbideos-ops node-id' \
@@ -443,7 +443,8 @@ case "$operation" in
     extension)
         [ "$#" -eq 2 ] || usage
         case "$1:$2" in
-            install:rat-game-16|remove:rat-game-16)
+            # Watchtower is not in the feed, so it cannot be fetched this way.
+            install:chrome|remove:chrome|install:rat-game-16|remove:rat-game-16)
                 exec /usr/bin/env -i PATH="$PATH" \
                     /usr/sbin/carbideos-extension "$1" "$2"
                 ;;

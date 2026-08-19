@@ -17,6 +17,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 ./scripts/build --playground
+./extensions/chrome/build --playground
 ./extensions/rat-game-16/build --playground
 ./scripts/package --playground
 ./scripts/sign --playground
