@@ -327,13 +327,13 @@ case "$operation" in
                 [ -f "/var/lib/extensions/watchtower_$running.raw" ] ||
                     [ -f /var/lib/extensions/watchtower.raw ]
             }; then
-                /usr/libexec/carbide-agent adopt watchtower "$current_version"
+                /usr/bin/carbide-agent adopt watchtower "$current_version"
             fi
             candidate="/var/lib/extensions/watchtower_$running.raw.$extension_version.candidate"
             /usr/bin/chmod 0644 "$staging"
             /usr/bin/mv -f "$staging" "$candidate"
             request_id=$(/usr/bin/cat /proc/sys/kernel/random/uuid)
-            /usr/libexec/carbide-agent activate watchtower "$extension_version" "$request_id"
+            /usr/bin/carbide-agent activate watchtower "$extension_version" "$request_id"
             printf 'extension watchtower installed\n'
             exit 0
         fi
