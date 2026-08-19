@@ -17,6 +17,7 @@ if [ "$variant" = fleet ]; then
     output=carbideos-fleet
     secureboot_cert=keys/production/secureboot/secureboot.crt
     trusted_release_pub=keys/production/manifest/release-signing.pub.asc
+    feed_extensions="chrome"
     update_prefix=carbideos-fleet
 elif [ "$variant" = playground ]; then
     release="$PWD/dist/playground/carbideos-${version}"
@@ -24,6 +25,7 @@ elif [ "$variant" = playground ]; then
     output=carbideos-playground
     secureboot_cert=keys/playground/secureboot/secureboot.crt
     trusted_release_pub=keys/playground/manifest/release-signing.pub.asc
+    feed_extensions="chrome rat-game-16"
     update_prefix=carbideos-playground
 else
     release="$PWD/dist/carbideos-${version}"
@@ -31,6 +33,7 @@ else
     output=carbideos
     secureboot_cert=keys/secureboot/secure-boot.crt
     trusted_release_pub=keys/manifest/release-signing.pub.asc
+    feed_extensions="chrome rat-game-16"
     update_prefix=carbideos
 fi
 verify_home=$(mktemp -d)
@@ -171,14 +174,14 @@ set -- "$update_feed"/"${update_prefix}_${version}_"*.verity.raw.zst
 verity_artifact=$1
 verity_sig_artifact="$update_feed/${update_prefix}_${version}.verity-sig.raw.zst"
 uki_artifact="$update_feed/${update_prefix}_${version}.efi"
-extension_artifact="$update_feed/rat-game-16_277d18d-3_\
-${version}.sysext.raw"
+for extension_name in $feed_extensions; do
+extension_artifact="$update_feed/${extension_name}_${version}.sysext.raw"
 if [ ! -s "$extension_artifact" ]; then
-    printf '%s\n' 'Missing Rat Game system extension artifact.' >&2
+    printf 'Missing %s system extension artifact.\n' "$extension_name" >&2
     exit 1
 fi
 if ! sudo systemd-dissect "$extension_artifact" | grep -q 'signed'; then
-    printf '%s\n' 'System extension is not verity signed.' >&2
+    printf '%s is not verity signed.\n' "$extension_name" >&2
     exit 1
 fi
 signature_start=$("$sfdisk" --json "$extension_artifact" | jq -r \
@@ -190,7 +193,7 @@ signature_der="$verify_home/sysext-signature.der"
 signature_cert="$verify_home/sysext-signature.crt"
 root_hash="$verify_home/sysext-root-hash"
 if [ -z "$signature_start" ] || [ -z "$signature_size" ]; then
-    printf '%s\n' 'System extension signature partition is missing.' >&2
+    printf '%s signature partition is missing.\n' "$extension_name" >&2
     exit 1
 fi
 dd if="$extension_artifact" bs=512 skip="$signature_start" \
@@ -200,7 +203,7 @@ printf '%s' "$(jq -r .rootHash "$signature_json")" >"$root_hash"
 if ! openssl cms -verify -binary -inform DER -in "$signature_der" \
         -content "$root_hash" -CAfile "$secureboot_cert" -purpose any \
         -out /dev/null; then
-    printf '%s\n' 'System extension verity signature is not trusted.' >&2
+    printf '%s verity signature is not trusted.\n' "$extension_name" >&2
     exit 1
 fi
 openssl pkcs7 -inform DER -in "$signature_der" -print_certs \
@@ -212,9 +215,10 @@ expected_fingerprint=$(openssl x509 -in "$release/sysext.crt" -noout \
 declared_fingerprint=$(jq -r .certificateFingerprint "$signature_json")
 if [ "$embedded_fingerprint" != "$expected_fingerprint" ] || \
    [ "$declared_fingerprint" != "$expected_fingerprint" ]; then
-    printf '%s\n' 'System extension signer does not match packaged trust.' >&2
+    printf '%s signer does not match packaged trust.\n' "$extension_name" >&2
     exit 1
 fi
+done
 if ! sbverify --cert "$secureboot_cert" "$uki_artifact" \
     >/dev/null; then
     printf '%s\n' 'UKI is not signed by the configured Secure Boot key.' >&2

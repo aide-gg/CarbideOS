@@ -149,6 +149,21 @@ cp "$secureboot_cert" "$release/secure-boot.crt"
 cp "$verity_cert" "$release/verity.crt"
 cp "$sysext_cert" "$release/sysext.crt"
 
+# A feed that once carried an extension would otherwise serve it forever.
+for stale in "$update_feed"/*.sysext.raw; do
+    [ -e "$stale" ] || continue
+    stem=${stale##*/}
+    stem=${stem%.sysext.raw}
+    keep=
+    for name in $feed_extensions; do
+        case "$stem" in "${name}_"*) keep=1 ;; esac
+    done
+    [ -n "$keep" ] || {
+        printf 'Removing %s, which this variant no longer publishes\n' "$stem"
+        rm -f "$stale"
+    }
+done
+
 # Named <extension>_<base version>: an extension only merges into the base it
 # was built against, and a node has to be able to construct this name from what
 # it knows. Its own version lives in SYSEXT_VERSION_ID inside the image.
