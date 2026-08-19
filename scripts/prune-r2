@@ -49,9 +49,22 @@ if [ -z "$profile" ]; then
 fi
 
 source=$(realpath "$source_directory")
-prefix=${CARBIDEOS_R2_PREFIX:-carbideos}
+# The channel follows the directory, as it does when publishing. Defaulting to
+# development pointed this at the wrong channel's key for anything else, and
+# the signature check was all that stood between that and pruning the wrong
+# feed.
+case "$(basename "$source")" in
+    fleet) derived=carbideos/fleet ;;
+    playground) derived=carbideos/playground ;;
+    *) derived=carbideos ;;
+esac
+prefix=${CARBIDEOS_R2_PREFIX:-$derived}
 prefix=${prefix#/}
 prefix=${prefix%/}
+if [ -n "${CARBIDEOS_R2_PREFIX:-}" ] && [ "$prefix" != "$derived" ]; then
+    printf 'Pruning the %s channel, which does not follow from %s.\n' \
+        "$prefix" "$source" >&2
+fi
 case "$prefix" in
     carbideos)
         trusted_release_pub=$PWD/keys/manifest/release-signing.pub.asc
