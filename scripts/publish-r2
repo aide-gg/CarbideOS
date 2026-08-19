@@ -330,3 +330,18 @@ fi
 
 printf 'Published %s to r2://%s/%s (%s/%s bytes used).\n' \
     "$source" "$CARBIDEOS_R2_BUCKET" "$prefix" "$final" "$limit"
+
+# A base with no Watchtower image is one no node can boot into, and that build
+# reads its base list from this feed, so it has to be asked after the upload
+# rather than before. Not fatal: the feed is published either way and the build
+# can be started by hand.
+if [ "$prefix" = carbideos/fleet ]; then
+    if ! command -v gh >/dev/null 2>&1; then
+        printf '%s\n' 'gh is not installed; start the Watchtower sysext build by hand.' >&2
+    elif gh workflow run carbideos-sysext.yml \
+            --repo "${CARBIDEOS_WATCHTOWER_REPO:-aide-gg/watchtower}" >/dev/null 2>&1; then
+        printf '%s\n' 'Asked Watchtower to build sysexts for the published bases.'
+    else
+        printf '%s\n' 'Could not start the Watchtower sysext build; start it by hand.' >&2
+    fi
+fi
