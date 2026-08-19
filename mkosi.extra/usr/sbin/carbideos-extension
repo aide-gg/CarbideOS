@@ -30,7 +30,7 @@ case "$action" in
         temporary=$(mktemp "/var/lib/extensions/.$name.XXXXXX")
         trap 'rm -f "$temporary"' EXIT HUP INT TERM
         /usr/lib/systemd/systemd-pull raw --direct --verify=no \
-            --class=sysext --size-max=64M \
+            --class=sysext --size-max=1G \
             "https://updates.aide.gg/carbideos/$artifact" "$temporary"
         chmod 0644 "$temporary"
         mv -f "$temporary" "$target"

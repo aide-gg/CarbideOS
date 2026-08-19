@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 enable carbide-agent-health.service
+enable carbide-agent-api.socket
 enable carbideos-repart.service
 enable carbideos-counted-boot-reboot.service
 enable carbideos-home-init.service
