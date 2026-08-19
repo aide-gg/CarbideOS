@@ -75,18 +75,33 @@ pending_base_version() {
     printf '%s' "${pending%%+*}"
 }
 
-require_pending_watchtower() {
+# Every extension is pinned to the base it was built against, so a base update
+# orphans any that have no image staged for the incoming version.
+require_pending_extensions() {
     running=$(running_base_version)
-    if [ ! -f "/var/lib/extensions/watchtower_$running.raw" ] && \
-       [ ! -f /var/lib/extensions/watchtower.raw ]; then
-        return 0
-    fi
+    installed=
+    for image in /var/lib/extensions/*.raw; do
+        [ -f "$image" ] || continue
+        stem=${image##*/}
+        stem=${stem%.raw}
+        # Scoped images carry the base version after the final underscore; an
+        # unscoped one predates scoping and merges into whatever is running.
+        case "$stem" in
+            *_*) name=${stem%_*}; base=${stem##*_} ;;
+            *) name=$stem; base=$running ;;
+        esac
+        [ "$base" = "$running" ] || continue
+        installed="$installed $name"
+    done
+    [ -n "$installed" ] || return 0
     pending=$(pending_base_version) || return 1
-    [ -f "/var/lib/extensions/watchtower_$pending.raw" ] || {
-        printf 'Watchtower is installed, but no image is staged for CarbideOS %s\n' \
-            "$pending" >&2
-        return 1
-    }
+    for name in $installed; do
+        [ -f "/var/lib/extensions/${name}_${pending}.raw" ] || {
+            printf '%s is installed, but no image is staged for CarbideOS %s\n' \
+                "$name" "$pending" >&2
+            return 1
+        }
+    done
 }
 
 # A job identifier, and nothing else, may be interpolated into a unit name.
@@ -185,7 +200,7 @@ case "$operation" in
     reboot)
         [ "$#" -eq 0 ] || usage
         if /usr/lib/systemd/systemd-sysupdate pending; then
-            require_pending_watchtower
+            require_pending_extensions
             exec /usr/bin/env -i PATH="$PATH" \
                 /usr/lib/systemd/systemd-sysupdate reboot
         fi
@@ -205,7 +220,7 @@ case "$operation" in
             /usr/lib/systemd/systemd-sysupdate update "$@"
         /usr/bin/sync
         if /usr/lib/systemd/systemd-sysupdate pending; then
-            require_pending_watchtower
+            require_pending_extensions
             # pending_base_version also proved there is exactly one candidate.
             # shellcheck disable=SC1091
             . /etc/os-release
