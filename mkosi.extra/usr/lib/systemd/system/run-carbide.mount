@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Ephemeral CarbideOS runtime
+Documentation=man:systemd.mount(5)
+
+# Owned by the base rather than by an extension, because the base's agent
+# socket listens on a path inside it.
+#
+# It shipped in the Watchtower sysext, and the socket declared
+# RequiresMountsFor on this path expecting that to order the two. It could not:
+# no manager reload happens after a sysext merges, so at the point the socket
+# was loaded this unit did not exist yet and there was nothing for the
+# dependency to resolve to. The socket started eight seconds before the mount,
+# created its file on the plain /run tmpfs, and was hidden the moment this
+# landed on top. systemd went on reporting the socket as listening while
+# nothing could reach it by path, and a caller reads that as the base having no
+# agent at all.
+#
+# A dependency only holds if both ends are known when it is evaluated, and only
+# the base is guaranteed to be there that early.
+
+[Mount]
+What=tmpfs
+Where=/run/carbide
+Type=tmpfs
+Options=mode=0755,size=1G,nosuid,nodev

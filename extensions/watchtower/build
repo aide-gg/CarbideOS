@@ -123,8 +123,11 @@ install -m 0644 "$watchtower_source/dist/watchtower-carbideos.service" \
     "$root/usr/lib/systemd/system/watchtower.service"
 install -m 0644 "$watchtower_source/dist/ace@.service" \
     "$root/usr/lib/systemd/system/ace@.service"
-install -m 0644 "$watchtower_source/dist/run-carbide.mount" \
-    "$root/usr/lib/systemd/system/run-carbide.mount"
+# run-carbide.mount is deliberately not shipped here. It belongs to the base,
+# which owns /run/carbide and puts the agent socket inside it; an extension
+# cannot own a mount the base needs ordered before one of its own units,
+# because nothing reloads the manager after a merge and the unit is therefore
+# invisible when that ordering is evaluated.
 install -m 0644 "$watchtower_source/dist/ace-browser-smoke.service" \
     "$root/usr/lib/systemd/system/ace-browser-smoke.service"
 install -d "$root/usr/lib/systemd/system/multi-user.target.upholds"

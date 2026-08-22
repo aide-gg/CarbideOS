@@ -125,6 +125,15 @@ if ! grep -Fqx 'RequiresMountsFor=/run/carbide' \
     printf '%s\n' 'The agent socket must be ordered after the runtime mount.' >&2
     exit 1
 fi
+# That ordering only holds if both units are known when it is evaluated. No
+# manager reload happens after a sysext merges, so a mount shipped by an
+# extension does not exist yet at that point and the dependency resolves to
+# nothing. The base has to own the mount its own socket lives inside.
+if [ ! -f mkosi.extra/usr/lib/systemd/system/run-carbide.mount ] || \
+   grep -Fq 'dist/run-carbide.mount' extensions/watchtower/build; then
+    printf '%s\n' 'The runtime mount must ship in the base, not in an extension.' >&2
+    exit 1
+fi
 # A supplied image declares the base it was built for, and that has to be
 # honoured when the caller names none. Overriding it with whatever is running
 # refused every image built for a base the node had not booted yet, which is
