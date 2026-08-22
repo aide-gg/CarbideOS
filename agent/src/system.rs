@@ -415,14 +415,28 @@ pub fn journal(
 pub fn available_base_version() -> Result<Option<String>, String> {
     let output = run(SYSUPDATE, &["check-new"])
         .map_err(|error| format!("could not run systemd-sysupdate: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "systemd-sysupdate check-new failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!version.is_empty()).then_some(version));
     }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!version.is_empty()).then_some(version))
+
+    // check-new exits non-zero both when there is nothing newer and when it
+    // failed, and a node that is up to date is the common case. Enumerating
+    // separates them: if that works, the feed was read and there is genuinely
+    // nothing to install.
+    //
+    // Reporting the two alike told every healthy node its version check had
+    // failed, and made an update request fail before it began, because
+    // resolving the available version is the first thing it does.
+    let listed = run(SYSUPDATE, &["list"])
+        .map_err(|error| format!("could not run systemd-sysupdate: {error}"))?;
+    if listed.status.success() {
+        return Ok(None);
+    }
+    Err(format!(
+        "systemd-sysupdate check-new failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }
 
 /// Whether an update has been downloaded and is waiting for a reboot.
