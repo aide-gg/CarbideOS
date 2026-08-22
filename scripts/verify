@@ -125,6 +125,15 @@ if ! grep -Fqx 'RequiresMountsFor=/run/carbide' \
     printf '%s\n' 'The agent socket must be ordered after the runtime mount.' >&2
     exit 1
 fi
+# A supplied image declares the base it was built for, and that has to be
+# honoured when the caller names none. Overriding it with whatever is running
+# refused every image built for a base the node had not booted yet, which is
+# the only way to prepare one, and left a node unable to update at all.
+if ! grep -Fq 'requested: Option<&str>' agent/src/ops.rs || \
+   ! grep -Fq 'let base = declared_base.as_str();' agent/src/ops.rs; then
+    printf '%s\n' 'A supplied image must be staged for the base it declares.' >&2
+    exit 1
+fi
 if ! grep -Fqx '        panic=30' mkosi.conf || \
    ! grep -Fqx 'RuntimeWatchdogSec=60s' \
         mkosi.extra/etc/systemd/system.conf.d/60-carbideos-watchdog.conf || \

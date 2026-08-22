@@ -112,10 +112,17 @@ fn stage_extension(request: &Value) -> Reply {
             "stage-extension needs a name",
         ));
     };
-    let base = match ops::target_base(request.text("base").as_deref()) {
-        Ok(base) => base,
-        Err(failure) => return Reply::failed(failure),
-    };
+    // Left as the caller sent it. Absent means "whatever the image says",
+    // which is how an image for a base this node has not booted gets staged.
+    let base = request.text("base");
+    if let Some(base) = base.as_deref()
+        && !system::version_valid(base)
+    {
+        return Reply::failed(Failure::new(
+            Code::Malformed,
+            format!("unusable base version {base:?}"),
+        ));
+    }
 
     let source = match request.text("path") {
         Some(path) => {
@@ -135,7 +142,7 @@ fn stage_extension(request: &Value) -> Reply {
         },
     };
 
-    match ops::stage_extension(&name, &base, source) {
+    match ops::stage_extension(&name, base.as_deref(), source) {
         Ok(staged) => Reply::ok()
             .with("name", staged.name)
             .with("version", staged.version)

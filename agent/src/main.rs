@@ -307,8 +307,7 @@ fn stage_extension(arguments: &[String]) -> Result<(), String> {
         .first()
         .filter(|name| !name.starts_with("--"))
         .ok_or("usage: carbide-agent stage-extension NAME [options]")?;
-    let base = ops::target_base(option(arguments, "--base").as_deref())
-        .map_err(|failure| failure.message)?;
+    let base = option(arguments, "--base");
 
     let source = match option(arguments, "--path") {
         Some(path) => ops::Source::Supplied {
@@ -322,7 +321,7 @@ fn stage_extension(arguments: &[String]) -> Result<(), String> {
     };
 
     let activate = arguments.iter().any(|argument| argument == "--activate");
-    let staged = ops::stage_extension(name, &base, source).map_err(|f| describe(&f))?;
+    let staged = ops::stage_extension(name, base.as_deref(), source).map_err(|f| describe(&f))?;
 
     // An image for a base this node has not booted merges when that base
     // boots; there is nothing to activate now, and restarting a healthy

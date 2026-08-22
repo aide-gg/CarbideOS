@@ -301,7 +301,10 @@ caller.
 ## Caller obligations
 
 1. Issue `hello` and cache `capabilities` for the connection's lifetime.
-2. Treat a connect failure with `ENOENT` as "agent absent" — nothing else is.
+2. Treat a connect failure with `ENOENT` as "agent absent" only when
+   `/usr/bin/carbide-agent` is also missing. A missing socket beside an
+   installed binary means the socket unit has not started or something is
+   mounted over the path, which is a fault and must be reported as one.
 3. Treat every other failure as an agent fault and report it verbatim. Never
    silently fall back to running a privileged tool from inside a sandbox.
 4. Set a timeout on connect, write and read. The agent may be soaking an

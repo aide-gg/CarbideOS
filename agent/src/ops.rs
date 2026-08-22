@@ -58,7 +58,15 @@ pub fn target_base(requested: Option<&str>) -> Result<String, Failure> {
     }
 }
 
-pub fn stage_extension(name: &str, base: &str, source: Source) -> Result<Staged, Failure> {
+/// Place an image for a base version.
+///
+/// `base` absent means the caller did not care. A supplied image declares the
+/// base it was built for, so that is honoured rather than overridden with
+/// whatever happens to be running: an image for a base this node has not
+/// booted yet is the normal way to prepare an update, and refusing it made
+/// staging one impossible. An explicit `base` is still enforced, because a
+/// caller that names one is asserting something worth checking.
+pub fn stage_extension(name: &str, base: Option<&str>, source: Source) -> Result<Staged, Failure> {
     if !system::version_valid(name) {
         return Err(Failure::new(
             Code::Malformed,
@@ -66,7 +74,15 @@ pub fn stage_extension(name: &str, base: &str, source: Source) -> Result<Staged,
         ));
     }
     match source {
-        Source::Acquire { version } => acquire(name, base, version.as_deref()),
+        // Acquisition selects on the version, so it needs one resolved; the
+        // running base is the only sensible default.
+        Source::Acquire { version } => {
+            let base = match base {
+                Some(base) => base.to_string(),
+                None => target_base(None)?,
+            };
+            acquire(name, &base, version.as_deref())
+        }
         Source::Supplied { path, digest } => supplied(name, base, &path, &digest),
     }
 }
@@ -125,7 +141,7 @@ fn acquire(name: &str, base: &str, version: Option<&str>) -> Result<Staged, Fail
     })
 }
 
-fn supplied(name: &str, base: &str, path: &Path, digest: &str) -> Result<Staged, Failure> {
+fn supplied(name: &str, base: Option<&str>, path: &Path, digest: &str) -> Result<Staged, Failure> {
     if !path.is_absolute() {
         return Err(Failure::new(
             Code::Malformed,
@@ -168,7 +184,7 @@ fn supplied(name: &str, base: &str, path: &Path, digest: &str) -> Result<Staged,
     let _ = std::fs::remove_file(&staging);
     outcome.map(|placed| Staged {
         name: name.to_string(),
-        version: base.to_string(),
+        version: placed.base,
         path: placed.path,
         acquired: false,
         extension_version: placed.extension_version,
@@ -178,11 +194,17 @@ fn supplied(name: &str, base: &str, path: &Path, digest: &str) -> Result<Staged,
 
 struct Placed {
     path: String,
+    /// The base the image was actually placed for.
+    base: String,
     extension_version: Option<String>,
     for_running_base: bool,
 }
 
-fn validate_and_place(name: &str, base: &str, staging: &Path) -> Result<Placed, Failure> {
+fn validate_and_place(
+    name: &str,
+    requested: Option<&str>,
+    staging: &Path,
+) -> Result<Placed, Failure> {
     let validated = system::validate_image(staging).map_err(|error| {
         Failure::new(
             Code::Failed,
@@ -214,13 +236,18 @@ fn validate_and_place(name: &str, base: &str, staging: &Path) -> Result<Placed, 
             )
             .at(Stage::Validating)
         })?;
-    if declared_base != base {
+    // Only when the caller named one. Otherwise the image decides, which is
+    // what makes staging for a base this node has not booted yet possible.
+    if let Some(requested) = requested
+        && declared_base != requested
+    {
         return Err(Failure::new(
             Code::BaseMismatch,
-            format!("{name} declares base {declared_base}, staging was requested for {base}"),
+            format!("{name} declares base {declared_base}, staging was requested for {requested}"),
         )
         .at(Stage::Validating));
     }
+    let base = declared_base.as_str();
 
     let running = state::os_version();
     let for_running_base = running.as_deref() == Some(base);
@@ -251,6 +278,7 @@ fn validate_and_place(name: &str, base: &str, staging: &Path) -> Result<Placed, 
     let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644));
     Ok(Placed {
         path: target.to_string_lossy().into_owned(),
+        base: base.to_string(),
         extension_version: declared_version,
         for_running_base,
     })
