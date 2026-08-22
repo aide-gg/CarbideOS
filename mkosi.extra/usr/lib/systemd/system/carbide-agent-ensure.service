@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Start the system extensions this node requires
+Documentation=man:systemd.service(5)
+# Extensions have to be merged and their units visible before any of them can
+# be started. systemd-sysext.service runs before sysinit.target, so it has long
+# since completed by the time this runs.
+After=systemd-sysext.service local-fs.target
+RequiresMountsFor=/var/lib/extensions /var/lib/carbide
+ConditionPathExists=!/etc/initrd-release
+
+# This exists because an extension cannot reliably start itself.
+#
+# A sysext ships a multi-user.target.upholds/ symlink to have its service
+# started once merged, and that never takes effect: EXTENSION_RELOAD_MANAGER is
+# set and the merge succeeds, but no manager reload happens during early boot,
+# so multi-user.target keeps the dependencies it resolved before the extension
+# existed. The symlink is on disk and systemd never reads it.
+#
+# carbide-agent-health.service was hiding that, because it starts required
+# extensions on its way to judging them. It only runs while boot assessment is
+# in progress, so a node came up correctly after an update and came up with no
+# fleet agent after an ordinary reboot — the failure appeared only on the boots
+# nobody was watching.
+#
+# Deliberately separate from that unit rather than folded into it. Gating a
+# boot means being able to fail it, and failing a boot that has no counter left
+# to spend is a reboot loop with nothing to stop it. This one starts what the
+# node requires and reports; the gate keeps the power to reject a boot, and
+# keeps only running where a rollback can follow.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/carbide-agent health-gate
+# Recovery restarts a service, waits for readiness and then soaks it, and this
+# bound only matters when something is already wrong.
+TimeoutStartSec=900
+# No FailureAction. A node that cannot start an extension is degraded and worth
+# reporting; rebooting it here would not fix it and could not be stopped.
+
+[Install]
+WantedBy=multi-user.target

@@ -103,6 +103,28 @@ if ! grep -Fq 'system::set_oneshot' agent/src/ops.rs || \
     printf '%s\n' 'The agent must flush and select a one-shot entry when staging a base.' >&2
     exit 1
 fi
+# A required extension has to be started on every boot, not only while boot
+# assessment is running. The upholds symlink a sysext ships never registers,
+# because no manager reload happens after the merge, so without this a node
+# came up correctly after an update and came up with no fleet agent after an
+# ordinary reboot.
+if ! grep -Fqx 'WantedBy=multi-user.target' \
+        mkosi.extra/usr/lib/systemd/system/carbide-agent-ensure.service || \
+   ! grep -Fq 'carbide-agent health-gate' \
+        mkosi.extra/usr/lib/systemd/system/carbide-agent-ensure.service || \
+   grep -Fq 'FailureAction=' \
+        mkosi.extra/usr/lib/systemd/system/carbide-agent-ensure.service; then
+    printf '%s\n' 'Required extensions must start every boot, and must not reboot on failure.' >&2
+    exit 1
+fi
+# The agent socket listens inside a tmpfs an extension mounts. Without an
+# ordering the two race, and a socket created first is hidden when the mount
+# lands on top, which reads to a caller as "this base has no agent".
+if ! grep -Fqx 'RequiresMountsFor=/run/carbide' \
+        mkosi.extra/usr/lib/systemd/system/carbide-agent-api.socket; then
+    printf '%s\n' 'The agent socket must be ordered after the runtime mount.' >&2
+    exit 1
+fi
 if ! grep -Fqx '        panic=30' mkosi.conf || \
    ! grep -Fqx 'RuntimeWatchdogSec=60s' \
         mkosi.extra/etc/systemd/system.conf.d/60-carbideos-watchdog.conf || \

@@ -91,6 +91,7 @@ systemctl enable sshd.service systemd-homed.service systemd-networkd.service \
     systemd-sysext.service qemu-guest-agent.service \
     carbideos-home-init.service carbideos-homed-activate.service \
     carbideos-repart.service carbide-agent-api.socket \
+    carbide-agent-ensure.service \
     carbideos-sshd-keygen.service carbideos-var-init.service home.mount \
     var.mount var-lib-carbideos-workload.mount
 if [ "$variant" = playground ]; then

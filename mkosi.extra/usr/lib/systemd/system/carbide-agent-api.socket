@@ -3,6 +3,12 @@
 [Unit]
 Description=Socket for privileged CarbideOS operations
 Documentation=man:systemd.socket(5)
+# The listen path lives inside a tmpfs an extension mounts. Without this the
+# two race, and a socket created first is hidden when the mount lands on top:
+# systemd keeps the descriptor and reports the unit listening while nothing can
+# reach it by path. Resolved at runtime, so it holds whichever unit provides
+# the mount and whether or not one exists at all.
+RequiresMountsFor=/run/carbide
 
 [Socket]
 ListenStream=/run/carbide/agent.sock
