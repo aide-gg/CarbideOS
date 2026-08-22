@@ -158,6 +158,24 @@ mkfs.erofs --quiet --all-root -T "$epoch" \
     --file-contexts=extensions/watchtower/file-contexts \
     "$work/root.erofs" "$root"
 
+# Sized to what it holds rather than to a fixed allocation.
+#
+# A partition with no maximum grows to fill whatever the image has spare, so a
+# fixed --size was split evenly between the data and its hash tree: 95.5 MiB
+# each, for around 105 MiB of content and a tree that needs under two. Every
+# sysext was 192 MiB whatever went into it, three quarters of it zeroes, and
+# each one is stored on the release, in the feed, and on the node once per base
+# version it was built for.
+#
+# The tree is one SHA256 per 4 KiB block, so about data/127 including the upper
+# levels. A sixty-fourth plus a megabyte is roughly twice that, which is slack
+# enough to be safe without being worth reclaiming.
+erofs_bytes=$(stat -c%s "$work/root.erofs")
+verity_bytes=$(( erofs_bytes / 64 + 1024 * 1024 ))
+# GPT keeps a header at each end and repart aligns partitions, so leave room.
+image_bytes=$(( erofs_bytes + verity_bytes + 16384 + 2 * 1024 * 1024 ))
+image_mib=$(( (image_bytes + 1048575) / 1048576 ))
+
 definitions="$work/repart.d"
 install -d "$definitions"
 cat >"$definitions/10-root.conf" <<EOF
@@ -167,6 +185,8 @@ CopyBlocks=$work/root.erofs
 Verity=data
 VerityMatchKey=root
 ReadOnly=yes
+SizeMinBytes=$erofs_bytes
+SizeMaxBytes=$erofs_bytes
 EOF
 cat >"$definitions/20-root-verity.conf" <<EOF
 [Partition]
@@ -174,6 +194,7 @@ Type=root-verity
 Verity=hash
 VerityMatchKey=root
 ReadOnly=yes
+SizeMaxBytes=$verity_bytes
 EOF
 cat >"$definitions/30-root-verity-sig.conf" <<EOF
 [Partition]
@@ -183,12 +204,19 @@ VerityMatchKey=root
 ReadOnly=yes
 EOF
 rm -f "$output/watchtower.raw"
-systemd-repart --empty=create --size=192M \
+systemd-repart --empty=create --size="${image_mib}M" \
     --seed=9f715775-f522-468b-8e4f-00b8516874ec \
     --definitions="$definitions" \
     --private-key="$signing_key" \
     --certificate="$signing_cert" \
     "$output/watchtower.raw"
+
+# The merge enforces this, so a mis-sized image should fail here rather than on
+# a node. A hash tree that did not fit its bound is the failure worth catching:
+# the image would still build and would not validate.
+systemd-dissect --validate \
+    --image-policy=root=verity+signed+absent:usr=verity+signed+absent \
+    "$output/watchtower.raw" >/dev/null
 (
     cd "$output"
     sha256sum watchtower.raw >SHA256SUMS
