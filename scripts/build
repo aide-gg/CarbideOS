@@ -271,6 +271,23 @@ if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
                 "$destination"
         fi
     done
+    # Named sysupdate components — one directory per acquirable extension.
+    #
+    # Only the channel is rewritten. The base image is published under a
+    # per-variant name, but an extension image is not: chrome_0.1.58.sysext.raw
+    # is the same file name in every channel, so applying the prefix rewrite
+    # here would point the transfer at something that was never published.
+    for component in mkosi.extra/usr/lib/sysupdate.*.d; do
+        [ -d "$component" ] || continue
+        component_directory="$extra/usr/lib/$(basename "$component")"
+        install -d -m 0755 "$component_directory"
+        for transfer in "$component"/*.transfer; do
+            [ -f "$transfer" ] || continue
+            sed \
+                -e "s|https://updates.aide.gg/carbideos|https://updates.aide.gg/carbideos/$channel|g" \
+                "$transfer" >"$component_directory/$(basename "$transfer")"
+        done
+    done
     sed "s|https://updates.aide.gg/carbideos/|https://updates.aide.gg/carbideos/$channel/|g" \
         mkosi.extra/usr/sbin/carbideos-extension \
         >"$extra/usr/sbin/carbideos-extension"

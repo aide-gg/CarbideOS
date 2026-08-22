@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Chrome as a sysupdate component, so carbide-agent can acquire it without a
+# caller having to know where it comes from.
+#
+# Before this, nothing on the node owned fetching Chrome. The base image was
+# fetched by sysupdate and the Watchtower sysext by Watchtower, and Chrome fell
+# between them: it had to be pushed in over SSH at enrolment and pushed again
+# by hand for every base update. A base staged without it is refused, so a
+# node could not update itself at all until someone noticed and intervened.
+#
+# The version here is the *base* version the image is built for, which is how
+# these images are named in the feed (chrome_0.1.58.sysext.raw). Asking for a
+# version therefore means asking for the Chrome built against that base.
+[Transfer]
+Verify=yes
+
+[Source]
+Type=url-file
+Path=https://updates.aide.gg/carbideos
+MatchPattern=chrome_@v.sysext.raw
+
+[Target]
+Type=regular-file
+Path=/var/lib/extensions
+# An underscore, because systemd derives an extension's name from its image
+# file name and strips a version only after that separator.
+MatchPattern=chrome_@v.raw
+Mode=0644
+# The outgoing base keeps its Chrome while the incoming one has its own, which
+# is what lets a base rollback find a working extension already in place.
+InstancesMax=2

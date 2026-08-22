@@ -86,13 +86,21 @@ if ! grep -qx 'Mode=0600' \
     printf '%s\n' 'UKI transfer must remain root-writable for boot counting.' >&2
     exit 1
 fi
-if ! grep -Fq '/usr/bin/bootctl set-oneshot' \
-        mkosi.extra/usr/sbin/carbideos-ops || \
-   ! grep -Fqx '        /usr/bin/sync' \
+# Staging a base image must select a one-shot entry rather than becoming the
+# default, and must flush before it does. Both moved out of carbideos-ops into
+# carbide-agent, which is now the single implementation the broker, the socket
+# and the agent's own command line all reach.
+if ! grep -Fq '/usr/bin/carbide-agent stage-base' \
         mkosi.extra/usr/sbin/carbideos-ops || \
    ! grep -Fq '/usr/lib/systemd/systemd-sysupdate reboot' \
         mkosi.extra/usr/sbin/carbideos-ops; then
     printf '%s\n' 'Operator updates must explicitly activate through sysupdate.' >&2
+    exit 1
+fi
+if ! grep -Fq 'system::set_oneshot' agent/src/ops.rs || \
+   ! grep -Fq 'system::sync' agent/src/ops.rs || \
+   ! grep -Fq '"set-oneshot"' agent/src/system.rs; then
+    printf '%s\n' 'The agent must flush and select a one-shot entry when staging a base.' >&2
     exit 1
 fi
 if ! grep -Fqx '        panic=30' mkosi.conf || \

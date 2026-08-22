@@ -23,7 +23,8 @@ usage() {
         '       carbideos-ops agent require|unrequire|reset NAME' \
         '       carbideos-ops node-id' \
         '       carbideos-ops credential NAME        (value on stdin)' \
-        '       carbideos-ops install-extension NAME (image on stdin)' >&2
+        '       carbideos-ops install-extension NAME (image on stdin)' \
+        '       carbideos-ops extension-acquire NAME [BASE]' >&2
     exit 2
 }
 
@@ -211,22 +212,14 @@ case "$operation" in
         exec /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl poweroff
         ;;
     update)
+        # Delegated to the agent, which is also what the fleet drives. Two
+        # implementations means two sets of rules for when it is refused.
         [ "$#" -le 1 ] || usage
         if [ "$#" -eq 1 ] && ! version_valid "$1"; then
             printf 'Invalid CarbideOS version: %s\n' "$1" >&2
             exit 2
         fi
-        /usr/bin/env -i PATH="$PATH" \
-            /usr/lib/systemd/systemd-sysupdate update "$@"
-        /usr/bin/sync
-        if /usr/lib/systemd/systemd-sysupdate pending; then
-            require_pending_extensions
-            # pending_base_version also proved there is exactly one candidate.
-            # shellcheck disable=SC1091
-            . /etc/os-release
-            set -- "/boot/EFI/Linux/${IMAGE_ID}_"*+*-*.efi
-            /usr/bin/bootctl set-oneshot "${1##*/}"
-        fi
+        exec /usr/bin/carbide-agent stage-base "$@"
         ;;
     node-id)
         # Read-only, and not a secret: the node publishes this to the fleet in
@@ -261,160 +254,48 @@ case "$operation" in
         /usr/bin/mv -f "$staging" "$directory/$1"
         printf 'credential %s installed\n' "$1"
         ;;
+    extension-acquire)
+        # Fetch through the base image's own sysupdate component. Only works
+        # for anything in the update feed; Watchtower is not, and uses
+        # install-extension below.
+        [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+        extension_permitted "$1" || {
+            printf 'Refusing to install extension %s\n' "$1" >&2
+            exit 2
+        }
+        name=$1
+        shift
+        if [ "$#" -eq 1 ]; then
+            version_valid "$1" || {
+                printf 'Invalid CarbideOS version: %s\n' "$1" >&2
+                exit 2
+            }
+            exec /usr/bin/carbide-agent stage-extension "$name" --base "$1"
+        fi
+        exec /usr/bin/carbide-agent stage-extension "$name" --activate
+        ;;
     install-extension)
-        # A signed extension image supplied directly rather than fetched from
-        # the update feed. Watchtower is never published to the feed, so this is
-        # the only way it can reach a node.
-        #
-        # The image is not trusted because it arrived here: the merge below
-        # enforces verity and a signature made by a key in the sealed base
-        # image, and an image that fails is removed again.
+        # A signed image supplied directly. Watchtower is never in the feed, so
+        # this is the only way it reaches a node. Validation, placement and
+        # activation all happen in carbide-agent.
         [ "$#" -eq 1 ] || usage
         extension_permitted "$1" || {
             printf 'Refusing to install extension %s\n' "$1" >&2
             exit 2
         }
-        policy=root=verity+signed+absent:usr=verity+signed+absent
-        /usr/bin/install -d -m 0755 /var/lib/extensions
-        # Staged outside the extensions directory and under a .raw name.
-        # systemd-dissect decides how to read a file from its suffix and
-        # reports nothing at all for one it does not recognise, so the version
-        # cannot be read from a file named .staging. A .raw file cannot be
-        # staged in the extensions directory either, because systemd-sysext
-        # merges every one of those. Same filesystem, so the move below is a
-        # rename rather than a second copy of a very large file.
+        # .raw suffix, outside the extensions directory: dissect reads the
+        # format from the suffix, and sysext merges every .raw in that dir.
         /usr/bin/install -d -m 0700 /var/lib/carbide/staging
-        staging="/var/lib/carbide/staging/$1.raw"
+        staging="/var/lib/carbide/staging/$1.upload.raw"
+        trap '/usr/bin/rm -f "$staging"' EXIT HUP INT TERM
         /usr/bin/head -c 1073741824 >"$staging"
         [ -s "$staging" ] || {
-            /usr/bin/rm -f "$staging"
             printf 'Refusing to install an empty extension image\n' >&2
             exit 1
         }
-        if ! /usr/bin/systemd-dissect --validate \
-             --image-policy="$policy" "$staging" >/dev/null; then
-            /usr/bin/rm -f "$staging"
-            printf 'Extension %s failed signed image validation\n' "$1" >&2
-            exit 1
-        fi
-        # The image is stored under the base version it declares, so images for
-        # the running base and for a pending one can sit here together and
-        # systemd merges whichever matches. That is what makes a base update
-        # survivable: the outgoing base keeps its extension, and a rollback
-        # finds it still in place.
-        image_version=$(image_base_version "$staging")
-        if ! version_valid "$image_version"; then
-            /usr/bin/rm -f "$staging"
-            printf 'Extension %s declares no usable base version\n' "$1" >&2
-            exit 1
-        fi
-        trap '/usr/bin/rm -f "$staging"' EXIT HUP INT TERM
-        running=$(running_base_version)
-        extension_version=$(image_extension_version "$staging")
-        if ! version_valid "$extension_version"; then
-            printf 'Extension %s declares no usable extension version\n' "$1" >&2
-            exit 1
-        fi
-        if [ "$1" = watchtower ] && [ "$image_version" = "$running" ]; then
-            current_version=
-            if [ -r /usr/lib/extension-release.d/extension-release.watchtower ]; then
-                current_version=$(/usr/bin/sed -n \
-                    's/^SYSEXT_VERSION_ID=//p' \
-                    /usr/lib/extension-release.d/extension-release.watchtower \
-                    | /usr/bin/head -1)
-            fi
-            if version_valid "$current_version" && {
-                [ -f "/var/lib/extensions/watchtower_$running.raw" ] ||
-                    [ -f /var/lib/extensions/watchtower.raw ]
-            }; then
-                /usr/bin/carbide-agent adopt watchtower "$current_version"
-            fi
-            candidate="/var/lib/extensions/watchtower_$running.raw.$extension_version.candidate"
-            /usr/bin/chmod 0644 "$staging"
-            /usr/bin/mv -f "$staging" "$candidate"
-            request_id=$(/usr/bin/cat /proc/sys/kernel/random/uuid)
-            /usr/bin/carbide-agent activate watchtower "$extension_version" "$request_id"
-            printf 'extension watchtower installed\n'
-            exit 0
-        fi
-        # An underscore, because systemd strips a version from an image name
-        # only after that separator. With any other one it looks for an
-        # extension-release named after the whole string, does not find it, and
-        # reports the image unreadable rather than incompatible, which fails
-        # the whole merge and takes every other extension down with it.
-        target="/var/lib/extensions/$1_$image_version.raw"
-        previous=
-        if [ -f "$target" ]; then
-            previous="/var/lib/extensions/.$1.previous"
-            /usr/bin/cp -f "$target" "$previous"
-        fi
-        /usr/bin/chmod 0644 "$staging"
-        /usr/bin/mv -f "$staging" "$target"
-        # An unscoped image predates scoping and is always superseded by this
-        # one, whatever base it was built for. Removing it only on a version
-        # match was not enough: an older image that still declares SYSEXT_LEVEL
-        # matches any base that also declares one, so it merged alongside the
-        # scoped image and the node ran two copies of the same extension.
-        /usr/bin/rm -f "/var/lib/extensions/$1.raw"
-        # An image built for a base that is not running is staged, not broken:
-        # it merges when that base boots. Only an image for the running base is
-        # expected to merge now.
-        #
-        # A refresh exits zero even when it silently skips a mismatched image,
-        # so its status alone would report success for an extension that never
-        # merged. For the running base the merged tree is the only honest
-        # evidence.
-        merged_ok=0
-        if /usr/bin/env -i PATH="$PATH" \
-            /usr/bin/systemd-sysext --image-policy="$policy" refresh; then
-            # Written as a plain if, because an && list that fails here is the
-            # last command in this branch and set -e would abort the script
-            # before the image below could be rolled back.
-            if [ "$image_version" != "$running" ]; then
-                merged_ok=1
-            elif [ -f "/usr/lib/extension-release.d/extension-release.$1" ]; then
-                merged_ok=1
-            fi
-        fi
-        if [ "$merged_ok" -eq 1 ]; then
-            /usr/bin/rm -f "$previous"
-            # A refresh does not restart a service that is already running, so
-            # it would keep executing the previous image until something else
-            # restarted it. Only worth doing when something actually changed
-            # under it; a staged image has not been merged and restarting for
-            # it would interrupt a healthy supervisor for no reason.
-            if [ "$image_version" = "$running" ] && \
-               /usr/bin/systemctl list-unit-files watchtower.service >/dev/null 2>&1; then
-                /usr/bin/env -i PATH="$PATH" \
-                    /usr/bin/systemctl restart watchtower.service || true
-            fi
-            # Keep the running base's image and one neighbour, so a rollback
-            # still finds its extension while the state partition stays bounded.
-            # These are hundreds of megabytes each.
-            for stale in $(/usr/bin/ls -1 "/var/lib/extensions/$1_"*.raw 2>/dev/null \
-                | /usr/bin/sed "s|.*/$1_||;s|\.raw$||" \
-                | /usr/bin/sort -V | /usr/bin/head -n -2); do
-                if [ "$stale" != "$running" ]; then
-                    /usr/bin/rm -f "/var/lib/extensions/$1_$stale.raw"
-                fi
-            done
-            if [ "$image_version" = "$running" ]; then
-                printf 'extension %s installed\n' "$1"
-            else
-                printf 'extension %s staged for CarbideOS %s\n' "$1" "$image_version"
-            fi
-        else
-            if [ -n "$previous" ]; then
-                /usr/bin/mv -f "$previous" "$target"
-            else
-                /usr/bin/rm -f "$target"
-            fi
-            /usr/bin/env -i PATH="$PATH" \
-                /usr/bin/systemd-sysext --image-policy="$policy" refresh || true
-            printf 'Extension %s did not merge and has been removed\n' "$1" >&2
-            printf 'It is signed for a different CarbideOS version, or its verity signature was refused.\n' >&2
-            exit 1
-        fi
+        digest=$(/usr/bin/sha256sum "$staging" | /usr/bin/cut -d' ' -f1)
+        exec /usr/bin/carbide-agent stage-extension "$1" \
+            --path "$staging" --digest "$digest" --activate
         ;;
     agent)
         # The recovery component's own controls. Without these a fleet node
