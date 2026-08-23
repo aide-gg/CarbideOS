@@ -175,7 +175,7 @@ while IFS="$tab" read -r relative size; do
         # Extension images carry no channel in their name, so this cannot tell
         # one channel's from another's. The manifest signature above already
         # does, being made by a key only that channel holds.
-        SHA256SUMS|SHA256SUMS.gpg|*.sysext.raw)
+        SHA256SUMS|SHA256SUMS.gpg|*.sysext.raw|*.sysext.raw.zst)
             ;;
         *)
             case "$relative" in

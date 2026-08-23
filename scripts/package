@@ -108,7 +108,9 @@ remove_feed_version() {
     rm -f "$update_feed/${update_prefix}_$1"_*.root.raw.zst
     rm -f "$update_feed/${update_prefix}_$1"_*.verity.raw.zst
     for name in $feed_extensions; do
-        rm -f "$update_feed/${name}_$1.sysext.raw"
+        # Both spellings: an older feed holds these uncompressed.
+        rm -f "$update_feed/${name}_$1.sysext.raw" \
+            "$update_feed/${name}_$1.sysext.raw.zst"
     done
 }
 
@@ -150,9 +152,11 @@ cp "$verity_cert" "$release/verity.crt"
 cp "$sysext_cert" "$release/sysext.crt"
 
 # A feed that once carried an extension would otherwise serve it forever.
-for stale in "$update_feed"/*.sysext.raw; do
+# Both spellings, so an uncompressed image from an older feed is cleared too.
+for stale in "$update_feed"/*.sysext.raw "$update_feed"/*.sysext.raw.zst; do
     [ -e "$stale" ] || continue
     stem=${stale##*/}
+    stem=${stem%.sysext.raw.zst}
     stem=${stem%.sysext.raw}
     keep=
     for name in $feed_extensions; do
@@ -173,8 +177,17 @@ for name in $feed_extensions; do
         printf 'Missing %s system extension; run make extensions.\n' "$name" >&2
         exit 1
     fi
-    cp --preserve=mode,timestamps "$image" \
-        "$update_feed/${name}_${version}.sysext.raw"
+    # Published compressed. These are the largest thing in the feed, they are
+    # mostly a filesystem image rather than incompressible payload, and
+    # sysupdate decompresses a source by its suffix exactly as it already does
+    # for the base image beside it.
+    #
+    # zstd rather than xz: a little larger, decompresses several times faster
+    # on the node, and is the format already proven in this feed.
+    rm -f "$update_feed/${name}_${version}.sysext.raw" \
+        "$update_feed/${name}_${version}.sysext.raw.zst"
+    zstd -19 -T0 -q --no-progress -o \
+        "$update_feed/${name}_${version}.sysext.raw.zst" "$image"
 done
 
 raw=$(mktemp --suffix=.raw)

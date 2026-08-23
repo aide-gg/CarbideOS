@@ -112,6 +112,14 @@ Output=root
 OutputDirectory=../staging
 
 [Content]
+# Chrome's runtime dependencies. dnf resolves the transitive closure, which is
+# where most of the image comes from and where anything worth trimming lives.
+#
+# Trimming it by dependency scan does not work. Chrome dlopens GTK by name
+# rather than linking it, so GTK and everything under it reads as unreferenced
+# while being entirely live: gdk_pixbuf pulls glycin, which pulls an image
+# codec stack. Removing that on the strength of a readelf sweep breaks Chrome's
+# own rendering in a way headless testing never shows.
 Packages=alsa-lib
          at-spi2-atk
          at-spi2-core
@@ -169,6 +177,40 @@ jq -r '.packages[] | select(.type == "rpm") | .name' "$base_manifest" \
             done
     done
 
+# Drop what a browser automation image never reads. Chrome renders DeltaMath
+# identically without any of it, checked by screenshot.
+#
+# Deliberately kept: WidevineCdm. Its absence is a bot-detection signal, since
+# real Chrome has it and Chromium builds mostly do not, and 21 MiB is not worth
+# looking less like a browser.
+#
+# Chrome ships 220 UI translations at 50 MiB; en-US is 0.6 MiB of that. These
+# are its own menu strings and have no bearing on navigator.languages or
+# Accept-Language, which come from flags.
+find "$root/opt/google/chrome/locales" -type f ! -name 'en-US.pak' -delete 2>/dev/null || :
+# The closed half of Chrome's Optimization Guide: remote page-load hints and
+# on-device model execution. Loaded by dlopen rather than linked, absent from
+# DT_NEEDED, and nothing reachable from a page can observe it. Removing it also
+# forecloses the on-device model ever downloading itself onto the state
+# partition.
+rm -f "$root/opt/google/chrome/liboptimization_guide_internal.so"
+# Enterprise policy daemon, never started here.
+rm -f "$root/opt/google/chrome/chrome-management-service"
+# Data, not code: gettext catalogues for every package in the dependency
+# closure, manuals, and the IEEE hardware vendor database.
+rm -rf "$root/usr/share/locale" "$root/usr/share/man" "$root/usr/share/doc"
+rm -f "$root/usr/share/hwdata/oui.txt"
+# Python arrived through the dependency closure and nothing here links it
+# except itself. Chrome embeds no interpreter.
+#
+# Deliberately left in place: glycin, libheif, libaom, SvtAv1Enc, libjxl and
+# libhwy. They look like the same kind of spill and are not: gdk_pixbuf links
+# glycin, and Chrome dlopens GTK by name, so that chain is live whenever it
+# runs headful. Clearing those needs a headful smoke test on a node, not a
+# dependency scan, which reads dlopen as unreferenced.
+rm -f "$root/usr/lib64/libpython3."*".so"* "$root/usr/lib64/libpython3.so"
+rm -f "$root/usr/bin/python3."* "$root/usr/bin/python3"
+
 find "$root/usr" -depth -type d -empty -delete
 install -d "$root/usr/bin" "$root/usr/lib/extension-release.d"
 rm -f "$root/usr/lib/os-release"
@@ -189,6 +231,15 @@ mkfs.erofs --quiet --all-root --all-time -T "$epoch" \
     --file-contexts=extensions/chrome/file-contexts \
     "$work/root.erofs" "$root"
 
+# Sized to what it holds. A partition with no maximum grows to fill whatever
+# the image has spare, so a fixed --size was split between the data and its
+# hash tree rather than sized to either. The tree is one SHA256 per 4 KiB
+# block, about data/127; a sixty-fourth plus a megabyte is roughly double that.
+erofs_bytes=$(stat -c%s "$work/root.erofs")
+verity_bytes=$(( erofs_bytes / 64 + 1024 * 1024 ))
+image_bytes=$(( erofs_bytes + verity_bytes + 16384 + 2 * 1024 * 1024 ))
+image_mib=$(( (image_bytes + 1048575) / 1048576 ))
+
 definitions="$work/repart.d"
 install -d "$definitions"
 cat >"$definitions/10-root.conf" <<EOF
@@ -198,6 +249,8 @@ CopyBlocks=$work/root.erofs
 Verity=data
 VerityMatchKey=root
 ReadOnly=yes
+SizeMinBytes=$erofs_bytes
+SizeMaxBytes=$erofs_bytes
 EOF
 cat >"$definitions/20-root-verity.conf" <<EOF
 [Partition]
@@ -205,6 +258,7 @@ Type=root-verity
 Verity=hash
 VerityMatchKey=root
 ReadOnly=yes
+SizeMaxBytes=$verity_bytes
 EOF
 cat >"$definitions/30-root-verity-sig.conf" <<EOF
 [Partition]
@@ -214,12 +268,18 @@ VerityMatchKey=root
 ReadOnly=yes
 EOF
 rm -f "$output/chrome.raw"
-systemd-repart --empty=create --size=512M \
+systemd-repart --empty=create --size="${image_mib}M" \
     --seed=4d8ec194-c9a5-4911-a1ba-37259165044c \
     --definitions="$definitions" \
     --private-key="$signing_key" \
     --certificate="$signing_cert" \
     "$output/chrome.raw"
+
+# The merge enforces this, so a hash tree that did not fit its bound should
+# fail here rather than on a node, where it would simply refuse to merge.
+systemd-dissect --validate \
+    --image-policy=root=verity+signed+absent:usr=verity+signed+absent \
+    "$output/chrome.raw" >/dev/null
 (
     cd "$output"
     sha256sum chrome.raw >SHA256SUMS

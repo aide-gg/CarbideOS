@@ -223,11 +223,15 @@ verity_artifact=$1
 verity_sig_artifact="$update_feed/${update_prefix}_${version}.verity-sig.raw.zst"
 uki_artifact="$update_feed/${update_prefix}_${version}.efi"
 for extension_name in $feed_extensions; do
-extension_artifact="$update_feed/${extension_name}_${version}.sysext.raw"
-if [ ! -s "$extension_artifact" ]; then
+extension_compressed="$update_feed/${extension_name}_${version}.sysext.raw.zst"
+if [ ! -s "$extension_compressed" ]; then
     printf 'Missing %s system extension artifact.\n' "$extension_name" >&2
     exit 1
 fi
+# Published compressed, so expand it here: everything below reads a partition
+# table, and this also proves the artifact a node will fetch decompresses.
+extension_artifact="$verify_home/${extension_name}.sysext.raw"
+zstd -dqf -o "$extension_artifact" "$extension_compressed"
 if ! sudo systemd-dissect "$extension_artifact" | grep -q 'signed'; then
     printf '%s is not verity signed.\n' "$extension_name" >&2
     exit 1

@@ -18,7 +18,7 @@ Verify=yes
 [Source]
 Type=url-file
 Path=https://updates.aide.gg/carbideos
-MatchPattern=chrome_@v.sysext.raw
+MatchPattern=chrome_@v.sysext.raw.zst
 
 [Target]
 Type=regular-file

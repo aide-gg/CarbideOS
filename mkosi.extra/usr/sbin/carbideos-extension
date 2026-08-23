@@ -18,7 +18,8 @@ case "$name" in
 esac
 # Watchtower is deliberately absent: it is not published to the feed and
 # arrives only through carbideos-ops install-extension.
-artifact="${name}_${VERSION_ID}.sysext.raw"
+# Published compressed; systemd-pull decompresses a raw image by its suffix.
+artifact="${name}_${VERSION_ID}.sysext.raw.zst"
 
 # Scoped to the base it was built for, matching install-extension, so an image
 # for the running base and one for a pending base can sit here together.
