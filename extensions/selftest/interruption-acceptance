@@ -1,0 +1,64 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Kill an activation after candidate promotion and prove the next operation
+# reconciles the persisted transient phase onto known-good.
+set -eu
+
+[ "$(id -u)" -eq 0 ] || {
+    printf '%s\n' 'Run as root on the test node.' >&2
+    exit 1
+}
+staging=${1:-/var/tmp}
+# shellcheck disable=SC1091
+base=$(. /etc/os-release; printf '%s' "$VERSION_ID")
+extensions=/var/lib/extensions
+log=/var/tmp/carbide-selftest-interruption.log
+
+digest() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+cleanup() {
+    carbide-agent unrequire selftest >/dev/null 2>&1 || true
+    rm -f "$extensions"/selftest_"$base".raw \
+        "$extensions"/selftest_"$base".raw.* \
+        "$extensions"/selftest.raw "$extensions"/selftest.raw.*
+    systemd-sysext --image-policy=root=verity+signed+absent:usr=verity+signed+absent \
+        refresh >/dev/null 2>&1 || true
+}
+trap cleanup EXIT HUP INT TERM
+cleanup
+
+healthy="$staging/selftest-healthy-1.raw"
+hanging="$staging/selftest-hanging-3.raw"
+carbide-agent stage-extension selftest --path "$healthy" \
+    --digest "$(digest "$healthy")" --activate >/dev/null
+carbide-agent stage-extension selftest --path "$hanging" \
+    --digest "$(digest "$hanging")" >/dev/null
+
+carbide-agent activate selftest 3 >"$log" 2>&1 &
+pid=$!
+deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    if carbide-agent status | grep -q '"phase": "starting"'; then
+        break
+    fi
+    sleep 1
+done
+carbide-agent status | grep -q '"phase": "starting"' || {
+    printf '%s\n' 'Activation never reached the persisted starting phase.' >&2
+    cat "$log" >&2
+    exit 1
+}
+kill -KILL "$pid"
+wait "$pid" 2>/dev/null || true
+
+carbide-agent health-gate >/dev/null
+status=$(carbide-agent status)
+printf '%s' "$status" | grep -q '"phase": "active"'
+printf '%s' "$status" | grep -q '"active_version": "1"'
+[ "$(systemctl is-active carbide-selftest.service)" = active ]
+[ "$(find "$extensions" -maxdepth 1 -name 'selftest*.raw' | wc -l)" -eq 1 ]
+[ "$(find "$extensions" -maxdepth 1 -name 'selftest*.candidate' | wc -l)" -eq 0 ]
+
+printf '%s\n' 'PASS: interrupted activation reconciled onto revision 1.'

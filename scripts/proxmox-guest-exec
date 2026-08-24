@@ -6,10 +6,23 @@ cd "$(dirname "$0")/.."
 
 vmid=${1:-}
 if [ -z "$vmid" ] || [ "$#" -lt 2 ]; then
-    printf 'Usage: %s VMID COMMAND [ARGUMENT...]\n' "$0" >&2
+    printf 'Usage: %s VMID [--base64-stdin FILE] COMMAND [ARGUMENT...]\n' "$0" >&2
     exit 2
 fi
 shift
+input_file=
+if [ "${1:-}" = --base64-stdin ]; then
+    [ "$#" -ge 3 ] || {
+        printf 'Usage: %s VMID --base64-stdin FILE COMMAND [ARGUMENT...]\n' "$0" >&2
+        exit 2
+    }
+    input_file=$2
+    [ -f "$input_file" ] || {
+        printf 'No input file at %s.\n' "$input_file" >&2
+        exit 2
+    }
+    shift 2
+fi
 
 if [ -f .env.proxmox ]; then
     set -a
@@ -28,21 +41,61 @@ case "$base" in
 esac
 auth="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_NAME}=${PROXMOX_TOKEN_SECRET}"
 node=${PROXMOX_NODE:-Prox-PC}
-command=$(printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]')
-request=$(jq -cn --argjson command "$command" '{command: $command}')
-pid=$(curl -kfsS -X POST -H "$auth" -H 'Content-Type: application/json' \
-    --data "$request" "$base/nodes/$node/qemu/$vmid/agent/exec" |
-    jq -r '.data.pid')
+request_file=$(mktemp)
+encoded=
+cleanup() {
+    # shellcheck disable=SC2317
+    rm -f "$request_file"
+    # shellcheck disable=SC2317
+    [ -z "$encoded" ] || rm -f "$encoded"
+}
+trap cleanup EXIT HUP INT TERM
+if [ -n "$input_file" ]; then
+    encoded=$(mktemp)
+    base64 -w0 "$input_file" >"$encoded"
+    jq -cn --rawfile input "$encoded" --args \
+        '$ARGS.positional | {command: ., "input-data": $input}' -- "$@" \
+        >"$request_file"
+else
+    jq -cn --args '$ARGS.positional | {command: .}' -- "$@" >"$request_file"
+fi
+response=$(curl -ksS -X POST -H "$auth" -H 'Content-Type: application/json' \
+    --data-binary "@$request_file" "$base/nodes/$node/qemu/$vmid/agent/exec") || {
+    printf '%s\n' 'Proxmox guest-exec request failed.' >&2
+    exit 1
+}
+pid=$(printf '%s' "$response" | jq -r '.data.pid // empty')
+if [ -z "$pid" ]; then
+    message=$(printf '%s' "$response" | jq -r '.message // "guest agent returned no PID"')
+    printf 'VM %s guest-exec failed: %s\n' "$vmid" "$message" >&2
+    printf '%s' "$response" | jq -r \
+        '.errors // {} | to_entries[] | "  \(.key): \(.value)"' >&2
+    exit 1
+fi
 deadline=$(( $(date +%s) + 30 ))
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    data=$(curl -kfsS -H "$auth" \
-        "$base/nodes/$node/qemu/$vmid/agent/exec-status?pid=$pid" |
-        jq '.data')
-    if [ "$(printf '%s' "$data" | jq -r '.exited // 0')" -eq 1 ]; then
+    response=$(curl -ksS -H "$auth" \
+        "$base/nodes/$node/qemu/$vmid/agent/exec-status?pid=$pid") || {
+        printf 'VM %s guest-exec status request failed.\n' "$vmid" >&2
+        exit 1
+    }
+    data=$(printf '%s' "$response" | jq -c '.data // empty')
+    if [ -z "$data" ]; then
+        message=$(printf '%s' "$response" | jq -r '.message // "guest agent returned no status"')
+        printf 'VM %s guest-exec status failed: %s\n' "$vmid" "$message" >&2
+        exit 1
+    fi
+    exited=$(printf '%s' "$data" | jq -r '.exited // 0')
+    if [ "$exited" = 1 ]; then
         printf '%s' "$data" | jq -rj '."out-data" // ""'
         printf '%s' "$data" | jq -rj '."err-data" // ""' >&2
-        exit "$(printf '%s' "$data" | jq -r '.exitcode')"
+        code=$(printf '%s' "$data" | jq -r '.exitcode // 1')
+        case "$code" in
+            ''|*[!0-9]*) code=1 ;;
+            *) [ "$code" -le 255 ] || code=1 ;;
+        esac
+        exit "$code"
     fi
     sleep 1
 done

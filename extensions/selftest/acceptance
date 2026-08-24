@@ -11,6 +11,8 @@ set -eu
 extensions=/var/lib/extensions
 staging=${1:-/var/tmp}
 marker=/var/lib/carbide/selftest-unhealthy
+# shellcheck disable=SC1091
+base=$(. /etc/os-release; printf '%s' "$VERSION_ID")
 pass=0
 fail=0
 
@@ -45,9 +47,40 @@ active_version() {
     carbide-agent status | sed -n 's/.*"active_version": "\([^"]*\)".*/\1/p' | head -1
 }
 
+stage_and_activate() {
+    image=$1
+    digest=$(sha256sum "$image" | awk '{print $1}')
+    attempt carbide-agent stage-extension selftest \
+        --path "$image" --digest "$digest" --activate
+}
+
+printf '\n== 0. digest and signature failures never reach the active slot ==\n'
+attempt carbide-agent stage-extension selftest \
+    --path "$staging/selftest-healthy-1.raw" --digest deadbeef --activate
+check "$result" failed 'incorrect digest is refused'
+
+tampered="$staging/selftest-tampered.raw"
+cp "$staging/selftest-healthy-1.raw" "$tampered"
+# The signature partition is the final 16 KiB DDI partition. Corrupt it rather
+# than unused GPT padding so validation must reject the image before promotion.
+size=$(stat -c %s "$tampered")
+printf '\001' | dd of="$tampered" bs=1 seek=$((size - 32768)) \
+    conv=notrunc status=none
+stage_and_activate "$tampered"
+check "$result" failed 'tampered image is refused'
+check "$([ -e "$extensions/selftest_${base}.raw" ] && echo yes || echo no)" no \
+    'signature failure leaves no active image'
+rm -f "$tampered"
+
+if [ -f "$staging/selftest-wrong-base-9.raw" ]; then
+    digest=$(sha256sum "$staging/selftest-wrong-base-9.raw" | awk '{print $1}')
+    attempt carbide-agent stage-extension selftest --base "$base" \
+        --path "$staging/selftest-wrong-base-9.raw" --digest "$digest" --activate
+    check "$result" failed 'signed image for the wrong base is refused'
+fi
+
 printf '\n== 1. activate a healthy extension ==\n'
-cp "$staging/selftest-healthy-1.raw" "$extensions/selftest.raw.1.candidate"
-attempt carbide-agent activate selftest 1
+stage_and_activate "$staging/selftest-healthy-1.raw"
 check "$result" ok 'healthy candidate activates'
 check "$(phase)" active 'phase is active'
 check "$(active_version)" 1 'active on revision 1'
@@ -58,33 +91,75 @@ attempt carbide-agent health-gate
 check "$result" ok 'gate passes while healthy'
 
 printf '\n== 3. deliberately broken extension is undone ==\n'
-cp "$staging/selftest-broken-2.raw" "$extensions/selftest.raw.2.candidate"
-attempt carbide-agent activate selftest 2
+stage_and_activate "$staging/selftest-broken-2.raw"
 check "$result" failed 'broken candidate is rejected'
 check "$(phase)" recovered 'phase is recovered'
 check "$(active_version)" 1 'reverted to revision 1'
 check "$(systemctl is-active carbide-selftest.service)" active 'unit running again after revert'
 
-printf '\n== 4. started but not actually working ==\n'
+if [ -f "$staging/selftest-hanging-3.raw" ]; then
+    printf '\n== 4. readiness timeout is undone ==\n'
+    stage_and_activate "$staging/selftest-hanging-3.raw"
+    check "$result" failed 'candidate that never becomes ready is rejected'
+    check "$(phase)" recovered 'readiness timeout recovers known-good'
+    check "$(active_version)" 1 'readiness timeout restores revision 1'
+fi
+
+if [ -f "$staging/selftest-soak-fail-4.raw" ]; then
+    printf '\n== 5. death during soak is undone ==\n'
+    stage_and_activate "$staging/selftest-soak-fail-4.raw"
+    check "$result" failed 'candidate that dies during soak is rejected'
+    check "$(phase)" recovered 'soak death recovers known-good'
+    check "$(active_version)" 1 'soak death restores revision 1'
+fi
+
+if [ -f "$staging/selftest-no-ruleset-5.raw" ]; then
+    printf '\n== 6. candidate without a ruleset is undone ==\n'
+    stage_and_activate "$staging/selftest-no-ruleset-5.raw"
+    check "$result" failed 'candidate without a ruleset is rejected'
+    check "$(phase)" recovered 'missing candidate ruleset recovers known-good'
+    check "$(active_version)" 1 'missing candidate ruleset restores revision 1'
+fi
+
+if [ -f "$staging/selftest-missing-unit-6.raw" ]; then
+    printf '\n== 7. missing candidate unit cannot block rollback ==\n'
+    stage_and_activate "$staging/selftest-missing-unit-6.raw"
+    check "$result" failed 'candidate naming a missing unit is rejected'
+    check "$(phase)" recovered 'missing unit still recovers known-good'
+    check "$(active_version)" 1 'missing unit restores revision 1'
+fi
+
+printf '\n== 8. a missing merged ruleset restores known-good ==\n'
+rm -f "$extensions/selftest_${base}.raw"
+systemd-sysext --image-policy=root=verity+signed+absent:usr=verity+signed+absent \
+    refresh >/dev/null
+attempt carbide-agent health-gate
+check "$result" ok 'missing ruleset triggers local recovery'
+check "$(phase)" active 'missing ruleset recovers and passes the gate'
+check "$(active_version)" 1 'missing ruleset restores revision 1'
+check "$(systemctl is-active carbide-selftest.service)" active \
+    'restored unit is running'
+
+printf '\n== 9. started but not actually working ==\n'
 install -d /var/lib/carbide
 touch "$marker"
 attempt carbide-agent health-gate
 check "$result" failed 'probe failure caught despite the unit being active'
 check "$(phase)" unrecoverable 'terminal when the fallback fails too'
 
-printf '\n== 5. terminal state is not retried ==\n'
+printf '\n== 10. terminal state is not retried ==\n'
 last_output=$(carbide-agent health-gate 2>&1 || true)
 printf '%s' "$last_output" | grep -q terminal && result=ok || result=failed
 check "$result" ok 'gate refuses to retry a terminal extension'
 
-printf '\n== 6. operator recovery ==\n'
+printf '\n== 11. operator recovery ==\n'
 rm -f "$marker"
 carbide-agent reset selftest >/dev/null
 attempt carbide-agent health-gate
 check "$result" ok 'healthy again after reset'
 check "$(phase)" active 'phase back to active'
 
-printf '\n== 7. only the active image is merged ==\n'
+printf '\n== 12. only the active image is merged ==\n'
 merged=$(systemd-sysext status --no-pager | grep -c selftest || true)
 check "$([ "$merged" -ge 1 ] && echo yes || echo no)" yes 'selftest is merged'
 raws=$(find "$extensions" -maxdepth 1 -name 'selftest*.raw' | wc -l)
@@ -94,7 +169,8 @@ check "$leftover" 0 'no orphaned candidate image survives a failed activation'
 
 printf '\n== cleanup ==\n'
 carbide-agent unrequire selftest >/dev/null
-rm -f "$extensions"/selftest.raw "$extensions"/selftest.raw.*
+rm -f "$extensions"/selftest_"$base".raw "$extensions"/selftest_"$base".raw.* \
+    "$extensions"/selftest.raw "$extensions"/selftest.raw.*
 systemd-sysext --image-policy=root=verity+signed+absent:usr=verity+signed+absent \
     refresh >/dev/null 2>&1 || true
 rm -f "$marker"

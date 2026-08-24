@@ -1,0 +1,43 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+
+cd "$(dirname "$0")/.."
+
+vmid=${1:-}
+source=${2:-}
+destination=${3:-}
+if [ "$#" -ne 3 ] || [ -z "$vmid" ] || [ ! -f "$source" ] || \
+   [ -z "$destination" ]; then
+    printf 'Usage: %s VMID SOURCE DESTINATION\n' "$0" >&2
+    exit 2
+fi
+case "$vmid" in
+    *[!0-9]*) printf 'VMID must be numeric.\n' >&2; exit 2 ;;
+esac
+case "$destination" in
+    /*) ;;
+    *) printf 'Destination must be an absolute path.\n' >&2; exit 2 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+split -b 45000 -a 6 "$source" "$work/chunk."
+
+./scripts/proxmox-guest-exec "$vmid" /usr/bin/rm -f "$destination"
+for chunk in "$work"/chunk.*; do
+    # $1 is expanded by the guest shell, not this one.
+    # shellcheck disable=SC2016
+    ./scripts/proxmox-guest-exec "$vmid" --base64-stdin "$chunk" \
+        /usr/bin/bash -c '/usr/bin/base64 -d >> "$1"' _ "$destination"
+done
+
+expected=$(sha256sum "$source" | awk '{print $1}')
+actual=$(./scripts/proxmox-guest-exec "$vmid" /usr/bin/sha256sum "$destination" |
+    awk '{print $1}')
+if [ "$actual" != "$expected" ]; then
+    printf 'Copy verification failed for VM %s: expected %s, got %s.\n' \
+        "$vmid" "$expected" "$actual" >&2
+    exit 1
+fi
+printf 'Copied %s to VM %s:%s (%s).\n' "$source" "$vmid" "$destination" "$actual"

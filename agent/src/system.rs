@@ -6,8 +6,9 @@
 //! large dependency to carry in the one thing that has to keep working when
 //! everything else is broken.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -16,6 +17,8 @@ use std::time::{Duration, Instant};
 use crate::config::Ruleset;
 
 pub const EXTENSIONS_DIR: &str = "/var/lib/extensions";
+pub const STAGING_DIR: &str = "/var/lib/extensions/.carbide-staging";
+const SPACE_MARGIN: u64 = 16 * 1024 * 1024;
 
 /// Must match the policy in the systemd-sysext drop-in, or a manual refresh
 /// would apply weaker rules than boot does.
@@ -67,12 +70,210 @@ pub fn active_path(name: &str) -> PathBuf {
     scoped
 }
 
+pub fn remove_active(name: &str) -> io::Result<()> {
+    durable_remove(&scoped_active_path(name, &scope()))?;
+    durable_remove(&legacy_active_path(name))
+}
+
 pub fn rollback_path(name: &str, version: &str) -> PathBuf {
     Path::new(EXTENSIONS_DIR).join(format!("{name}_{}.raw.{version}.rollback", scope()))
 }
 
 pub fn candidate_path(name: &str, version: &str) -> PathBuf {
     Path::new(EXTENSIONS_DIR).join(format!("{name}_{}.raw.{version}.candidate", scope()))
+}
+
+fn temporary_path(target: &Path) -> io::Result<PathBuf> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("target has no parent directory"))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::other("target has no file name"))?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{name}.new")))
+}
+
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent directory"))?;
+    File::open(parent)?.sync_all()
+}
+
+/// Publish a complete file atomically and durably.
+///
+/// The temporary name deliberately does not end in `.raw`, so systemd-sysext
+/// can never merge bytes that have not reached disk yet.
+pub fn durable_copy(source: &Path, target: &Path) -> io::Result<()> {
+    let mut input = File::open(source)?;
+    let size = input.metadata()?.len();
+    durable_copy_file(&mut input, target, size)
+}
+
+/// Publish from one already-open inode, refusing growth beyond the bytes the
+/// caller budgeted before copying began.
+pub fn durable_copy_file(input: &mut File, target: &Path, maximum: u64) -> io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("target has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = temporary_path(target)?;
+    let _ = fs::remove_file(&temporary);
+    let permissions = input.metadata()?.permissions();
+
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        let copied = io::copy(&mut input.take(maximum.saturating_add(1)), &mut output)?;
+        if copied > maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source grew beyond its reserved size",
+            ));
+        }
+        output.set_permissions(permissions)?;
+        output.sync_all()?;
+        fs::rename(&temporary, target)?;
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub fn durable_remove(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn durable_mode(path: &Path, mode: u32) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    File::open(path)?.sync_all()?;
+    sync_parent(path)
+}
+
+/// Move a file without ever copying into its final visible name.
+pub fn durable_move(source: &Path, target: &Path) -> io::Result<()> {
+    durable_copy(source, target)?;
+    durable_remove(source)
+}
+
+/// Additional free bytes required after a candidate already exists.
+pub fn activation_space(candidate_size: u64, missing_rollback_size: u64) -> u64 {
+    candidate_size
+        .saturating_add(missing_rollback_size)
+        .saturating_add(SPACE_MARGIN)
+}
+
+/// Free bytes required before a supplied image is copied into local staging.
+pub fn staging_space(image_size: u64, missing_rollback_size: u64) -> u64 {
+    image_size
+        .saturating_mul(2)
+        .saturating_add(missing_rollback_size)
+        .saturating_add(SPACE_MARGIN)
+}
+
+fn prune_matching_in(
+    directory: &Path,
+    prefix: &str,
+    suffix: &str,
+    keep: Option<&Path>,
+) -> io::Result<()> {
+    let mut changed = false;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name.starts_with(prefix)
+            && file_name.ends_with(suffix)
+            && keep.is_none_or(|kept| kept != path)
+        {
+            fs::remove_file(path)?;
+            changed = true;
+        }
+    }
+    if changed {
+        File::open(directory)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub fn prune_rollbacks(name: &str, keep_version: Option<&str>) -> io::Result<()> {
+    let keep = keep_version.map(|version| rollback_path(name, version));
+    let prefix = format!("{name}_{}.raw.", scope());
+    prune_matching_in(
+        Path::new(EXTENSIONS_DIR),
+        &prefix,
+        ".rollback",
+        keep.as_deref(),
+    )
+}
+
+pub fn prune_candidates(name: &str, keep_version: Option<&str>) -> io::Result<()> {
+    let keep = keep_version.map(|version| candidate_path(name, version));
+    let prefix = format!("{name}_{}.raw.", scope());
+    prune_matching_in(
+        Path::new(EXTENSIONS_DIR),
+        &prefix,
+        ".candidate",
+        keep.as_deref(),
+    )
+}
+
+/// Candidate files for the running base, including ones published immediately
+/// before a power loss prevented their state record from being committed.
+pub fn candidate_files() -> io::Result<Vec<PathBuf>> {
+    let marker = format!("_{}.raw.", scope());
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(EXTENSIONS_DIR)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name.contains(&marker) && file_name.ends_with(".candidate") {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn prune_transaction_files_in(extensions: &Path, staging: &Path) -> io::Result<()> {
+    for directory in [extensions, staging] {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let mut changed = false;
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if directory == staging || (file_name.starts_with('.') && file_name.ends_with(".new")) {
+                fs::remove_file(entry.path())?;
+                changed = true;
+            }
+        }
+        if changed {
+            File::open(directory)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+pub fn prune_transaction_files() -> io::Result<()> {
+    prune_transaction_files_in(Path::new(EXTENSIONS_DIR), Path::new(STAGING_DIR))
 }
 
 /// Bytes available on the filesystem backing the extensions directory.
@@ -102,6 +303,13 @@ fn run(program: &str, args: &[&str]) -> io::Result<std::process::Output> {
         .output()
 }
 
+fn run_mutating(program: &str, args: &[&str]) -> io::Result<std::process::Output> {
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null());
+    crate::state::retain_operation_lock(&mut command);
+    command.output()
+}
+
 /// A finished command, kept whole.
 ///
 /// Every privileged step here is a subprocess, and the difference between a
@@ -118,6 +326,15 @@ pub struct Finished {
 
 pub fn capture(program: &str, args: &[&str]) -> io::Result<Finished> {
     let output = run(program, args)?;
+    finished(program, args, output)
+}
+
+fn capture_mutating(program: &str, args: &[&str]) -> io::Result<Finished> {
+    let output = run_mutating(program, args)?;
+    finished(program, args, output)
+}
+
+fn finished(program: &str, args: &[&str], output: std::process::Output) -> io::Result<Finished> {
     let mut command = String::from(program);
     for argument in args {
         command.push(' ');
@@ -170,21 +387,41 @@ pub fn validate_image(path: &Path) -> io::Result<Finished> {
 /// `SYSEXT_VERSION_ID` and an unanchored match reads the extension's own
 /// version as the base it belongs to, pinning the image to a base that does
 /// not exist so nothing ever merges it.
-pub fn image_versions(path: &Path) -> io::Result<(Option<String>, Option<String>)> {
+#[derive(Debug, PartialEq, Eq)]
+pub struct ImageRelease {
+    pub name: Option<String>,
+    pub base: Option<String>,
+    pub version: Option<String>,
+}
+
+pub fn image_release(path: &Path) -> io::Result<ImageRelease> {
     let finished = capture(DISSECT, &["--json=short", &path.to_string_lossy()])?;
     if !finished.ok {
-        return Ok((None, None));
+        return Ok(ImageRelease {
+            name: None,
+            base: None,
+            version: None,
+        });
     }
     Ok(parse_sysext_release(&finished.stdout))
 }
 
-fn parse_sysext_release(json: &str) -> (Option<String>, Option<String>) {
+fn parse_sysext_release(json: &str) -> ImageRelease {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) else {
-        return (None, None);
+        return ImageRelease {
+            name: None,
+            base: None,
+            version: None,
+        };
     };
     let Some(entries) = parsed.get("sysextRelease").and_then(|v| v.as_array()) else {
-        return (None, None);
+        return ImageRelease {
+            name: None,
+            base: None,
+            version: None,
+        };
     };
+    let mut name = None;
     let mut base = None;
     let mut extension = None;
     for entry in entries.iter().filter_map(|e| e.as_str()) {
@@ -196,9 +433,15 @@ fn parse_sysext_release(json: &str) -> (Option<String>, Option<String>) {
             base.get_or_insert_with(|| value.trim_matches('"').to_string());
         } else if let Some(value) = entry.strip_prefix("SYSEXT_VERSION_ID=") {
             extension.get_or_insert_with(|| value.trim_matches('"').to_string());
+        } else if let Some(value) = entry.strip_prefix("SYSEXT_ID=") {
+            name.get_or_insert_with(|| value.trim_matches('"').to_string());
         }
     }
-    (base, extension)
+    ImageRelease {
+        name,
+        base,
+        version: extension,
+    }
 }
 
 /// Shelled rather than pulled in as a crate. A digest implementation is a
@@ -253,7 +496,7 @@ pub fn acquire_component(name: &str, version: Option<&str>) -> io::Result<Finish
     if let Some(version) = version {
         args.push(version);
     }
-    capture(SYSUPDATE, &args)
+    capture_mutating(SYSUPDATE, &args)
 }
 
 /// Download and install a base image into the spare slot.
@@ -262,7 +505,7 @@ pub fn stage_base(version: Option<&str>) -> io::Result<Finished> {
     if let Some(version) = version {
         args.push(version);
     }
-    capture(SYSUPDATE, &args)
+    capture_mutating(SYSUPDATE, &args)
 }
 
 /// The extension images present for a given base version.
@@ -287,7 +530,7 @@ pub fn installed_extensions_for(base: &str) -> Vec<String> {
 }
 
 /// The base version an installed but not yet booted image would boot into.
-pub fn pending_base_version() -> Option<String> {
+pub fn pending_base_version() -> Result<Option<String>, String> {
     let image_id = fs::read_to_string("/etc/os-release")
         .ok()
         .and_then(|text| {
@@ -295,10 +538,13 @@ pub fn pending_base_version() -> Option<String> {
                 line.strip_prefix("IMAGE_ID=")
                     .map(|v| v.trim_matches('"').to_string())
             })
-        })?;
+        })
+        .ok_or_else(|| "could not read IMAGE_ID from /etc/os-release".to_string())?;
     let prefix = format!("{image_id}_");
     let mut found = None;
-    for entry in fs::read_dir("/boot/EFI/Linux").ok()?.flatten() {
+    let entries = fs::read_dir("/boot/EFI/Linux")
+        .map_err(|error| format!("could not read pending UKIs: {error}"))?;
+    for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let Some(rest) = name.strip_prefix(&prefix) else {
@@ -316,15 +562,15 @@ pub fn pending_base_version() -> Option<String> {
         // which base an extension must match is exactly how a node boots into
         // an image nothing supports.
         if found.is_some() {
-            return None;
+            return Err("more than one counted base image is pending".to_string());
         }
         found = Some(version.to_string());
     }
-    found
+    Ok(found)
 }
 
 pub fn set_oneshot(entry: &str) -> io::Result<Finished> {
-    capture("/usr/bin/bootctl", &["set-oneshot", entry])
+    capture_mutating("/usr/bin/bootctl", &["set-oneshot", entry])
 }
 
 /// Flush the staged slot before anything points a boot entry at it.
@@ -334,7 +580,7 @@ pub fn set_oneshot(entry: &str) -> io::Result<Finished> {
 /// eventually roll that back, but spending a boot to discover it is worse than
 /// waiting here.
 pub fn sync() -> io::Result<Finished> {
-    capture("/usr/bin/sync", &[])
+    capture_mutating("/usr/bin/sync", &[])
 }
 
 /// The counted boot entry for a pending base version.
@@ -449,7 +695,7 @@ pub fn update_pending() -> bool {
 /// Re-merge extensions. The drop-in sets EXTENSION_RELOAD_MANAGER, so units
 /// arriving from an extension become visible without a separate reload.
 pub fn sysext_refresh() -> io::Result<()> {
-    let output = run(
+    let output = run_mutating(
         "/usr/bin/systemd-sysext",
         &[&format!("--image-policy={IMAGE_POLICY}"), "refresh"],
     )?;
@@ -463,7 +709,7 @@ pub fn sysext_refresh() -> io::Result<()> {
 }
 
 pub fn daemon_reload() -> io::Result<()> {
-    let output = run("/usr/bin/systemctl", &["daemon-reload"])?;
+    let output = run_mutating("/usr/bin/systemctl", &["daemon-reload"])?;
     if output.status.success() {
         return Ok(());
     }
@@ -525,10 +771,10 @@ pub fn unit_failed(unit: &str) -> bool {
 }
 
 pub fn start_unit(unit: &str) -> io::Result<()> {
-    let _ = run("/usr/bin/systemctl", &["reset-failed", unit]);
+    let _ = run_mutating("/usr/bin/systemctl", &["reset-failed", unit]);
     // Do not block on the job. Readiness is judged by the ruleset's own
     // deadline, not by how long systemctl is willing to wait.
-    let output = run("/usr/bin/systemctl", &["--no-block", "start", unit])?;
+    let output = run_mutating("/usr/bin/systemctl", &["--no-block", "start", unit])?;
     if output.status.success() {
         return Ok(());
     }
@@ -539,8 +785,14 @@ pub fn start_unit(unit: &str) -> io::Result<()> {
 }
 
 pub fn stop_unit(unit: &str) -> io::Result<()> {
-    let _ = run("/usr/bin/systemctl", &["stop", unit]);
-    Ok(())
+    let output = run_mutating("/usr/bin/systemctl", &["stop", unit])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "failed to stop {unit}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 /// Wait for a unit to report active, restarting it up to the permitted number
@@ -648,20 +900,33 @@ pub fn install_active(source: &Path, name: &str) -> io::Result<()> {
     // Always writes the scoped name, even when a legacy image is still what
     // active_path reads, so that activating anything migrates the node.
     let target = scoped_active_path(name, &scope());
-    fs::copy(source, &target)?;
-    fs::set_permissions(&target, fs::metadata(source)?.permissions())?;
-    // Both would otherwise merge at once, giving two copies of one extension.
+    // Hide a legacy image before publishing the scoped one. A retained
+    // known-good already exists at this point, and a crash here is reconciled
+    // from that image rather than booting with two merge-visible copies.
     let legacy = legacy_active_path(name);
     if legacy != target && legacy.exists() {
-        fs::remove_file(&legacy)?;
+        durable_remove(&legacy)?;
     }
-    std::fs::File::open(EXTENSIONS_DIR)?.sync_all()?;
-    Ok(())
+    durable_copy(source, &target)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extension_name, parse_sysext_release, version_valid};
+    use std::fs;
+
+    use super::{
+        ImageRelease, activation_space, durable_copy, durable_copy_file, extension_name,
+        parse_sysext_release, prune_matching_in, prune_transaction_files_in, staging_space,
+        version_valid,
+    };
+
+    fn temporary_directory(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("carbide-agent-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("create test directory");
+        directory
+    }
 
     /// SYSEXT_VERSION_ID ends in the same text as VERSION_ID. Reading the base
     /// version with a loose match picks up the extension's own version, pins
@@ -676,14 +941,30 @@ mod tests {
         ]}"#;
         assert_eq!(
             parse_sysext_release(json),
-            (Some("0.1.58".into()), Some("0.2.92".into()))
+            ImageRelease {
+                name: Some("watchtower".into()),
+                base: Some("0.1.58".into()),
+                version: Some("0.2.92".into()),
+            }
         );
     }
 
     #[test]
     fn an_image_that_declares_nothing_reports_nothing() {
-        assert_eq!(parse_sysext_release("{}"), (None, None));
-        assert_eq!(parse_sysext_release("not json"), (None, None));
+        let empty = ImageRelease {
+            name: None,
+            base: None,
+            version: None,
+        };
+        assert_eq!(parse_sysext_release("{}"), empty);
+        assert_eq!(
+            parse_sysext_release("not json"),
+            ImageRelease {
+                name: None,
+                base: None,
+                version: None,
+            }
+        );
     }
 
     /// Versions are interpolated into image paths, so anything that could
@@ -714,5 +995,95 @@ mod tests {
     fn an_unscoped_image_is_left_alone() {
         assert_eq!(extension_name("watchtower"), "watchtower");
         assert_eq!(extension_name("rat-game-16"), "rat-game-16");
+    }
+
+    #[test]
+    fn durable_copy_replaces_only_after_the_source_is_complete() {
+        let directory = temporary_directory("durable-copy");
+        let source = directory.join("source");
+        let target = directory.join("extension.raw");
+        fs::write(&source, b"new complete image").expect("write source");
+        fs::write(&target, b"old complete image").expect("write target");
+
+        durable_copy(&source, &target).expect("replace target");
+        assert_eq!(
+            fs::read(&target).expect("read target"),
+            b"new complete image"
+        );
+        assert!(!directory.join(".extension.raw.new").exists());
+
+        let missing = directory.join("missing");
+        assert!(durable_copy(&missing, &target).is_err());
+        assert_eq!(
+            fs::read(&target).expect("read old target"),
+            b"new complete image"
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn durable_copy_never_exceeds_the_budgeted_inode_size() {
+        let directory = temporary_directory("bounded-copy");
+        let source = directory.join("source");
+        let target = directory.join("extension.raw");
+        fs::write(&source, b"oversized").expect("write source");
+        let mut source = fs::File::open(source).expect("open source");
+
+        assert!(durable_copy_file(&mut source, &target, 4).is_err());
+        assert!(!target.exists());
+        assert!(!directory.join(".extension.raw.new").exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn transaction_space_covers_temporary_and_retained_images() {
+        const MARGIN: u64 = 16 * 1024 * 1024;
+        assert_eq!(activation_space(32, 0), 32 + MARGIN);
+        assert_eq!(activation_space(32, 64), 96 + MARGIN);
+        assert_eq!(staging_space(32, 64), 128 + MARGIN);
+    }
+
+    #[test]
+    fn pruning_keeps_one_slot_and_never_crosses_base_scopes() {
+        let directory = temporary_directory("prune");
+        let keep = directory.join("watchtower_0.3.4.raw.2.rollback");
+        let remove = directory.join("watchtower_0.3.4.raw.1.rollback");
+        let other_base = directory.join("watchtower_0.3.3.raw.1.rollback");
+        let other_extension = directory.join("chrome_0.3.4.raw.1.rollback");
+        for path in [&keep, &remove, &other_base, &other_extension] {
+            fs::write(path, b"image").expect("write image");
+        }
+
+        prune_matching_in(
+            &directory,
+            "watchtower_0.3.4.raw.",
+            ".rollback",
+            Some(&keep),
+        )
+        .expect("prune rollbacks");
+        assert!(keep.exists());
+        assert!(!remove.exists());
+        assert!(other_base.exists());
+        assert!(other_extension.exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn interrupted_private_files_are_pruned() {
+        let directory = temporary_directory("transaction-prune");
+        let staging = directory.join(".carbide-staging");
+        fs::create_dir(&staging).expect("create staging directory");
+        let active = directory.join("watchtower_0.3.4.raw");
+        let temporary = directory.join(".watchtower_0.3.4.raw.new");
+        let staged = staging.join("watchtower.raw");
+        for path in [&active, &temporary, &staged] {
+            fs::write(path, b"image").expect("write image");
+        }
+
+        prune_transaction_files_in(&directory, &staging).expect("prune transaction files");
+        assert!(active.exists());
+        assert!(!temporary.exists());
+        assert!(!staged.exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

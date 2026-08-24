@@ -145,15 +145,16 @@ Updates are manual while the mechanism is being proven:
 
 ```bash
 sudo /usr/lib/systemd/systemd-sysupdate list
-sudo /usr/lib/systemd/systemd-sysupdate update
-sudo /usr/lib/systemd/systemd-sysupdate pending
-sudo /usr/lib/systemd/systemd-sysupdate reboot
+sudo carbideos-ops update
+sudo carbideos-ops reboot
 ```
 
-Fleet operators use `sudo carbideos-ops update` followed by
-`sudo carbideos-ops reboot`. The broker explicitly selects the counted UKI and
-activates pending updates through `systemd-sysupdate`; do not hard-stop a VM
-between writing an update and its first graceful reboot.
+The raw sysupdate commands are intentionally read-only operator diagnostics.
+All mutation goes through `carbideos-ops`, which serializes lifecycle work,
+validates every required extension for the incoming base before writing the
+inactive slot, explicitly selects the counted UKI, and activates pending updates
+through `systemd-sysupdate`. Do not hard-stop a VM between writing an update and
+its first graceful reboot.
 
 No update or reboot timer is enabled. Counted boots that reach
 `emergency.target` reboot after 15 seconds, kernel panics reboot after 30
@@ -253,16 +254,15 @@ service. CarbideOS configures systemd to service it every 60 seconds.
 ## Scope
 
 The current build implements the A/B base update transport, counted emergency
-retries, and TPM/LUKS state, but intentionally does not yet implement automatic
-update scheduling, application-aware boot health checks, volatile `/etc`,
-`carbide-agent`, workload sandboxing, or any closed-source AIde component.
+retries, TPM/LUKS state, and `carbide-agent` application-aware boot assessment.
+Required system extensions are health-gated before boot blessing and retain a
+local known-good image for automatic recovery. Base and extension staging are
+serialized, crash-consistent transactions.
 
-System extensions therefore have no automatic recovery yet. A broken extension
-merges cleanly, the node boots healthy, and whatever the extension provided is
-simply missing — the boot is still blessed. `CARBIDE-AGENT.md` specifies the
-component that closes this, including the required-extension set, the health
-ruleset extensions ship inside themselves, image slot naming, and the boot
-gate.
+Automatic update scheduling, volatile `/etc`, the final persistence allowlist,
+and the complete workload/credential architecture remain future work. Closed
+source AIde components are built as separate signed artifacts and are not part
+of the base image.
 
 ## License
 

@@ -63,6 +63,15 @@ running_base_version() {
     printf '%s' "$VERSION_ID"
 }
 
+lock_lifecycle() {
+    /usr/bin/install -d -m 0755 /var/lib/carbide/agent
+    exec 9>/var/lib/carbide/agent/operation.lock
+    /usr/bin/flock -n 9 || {
+        printf '%s\n' 'Another OS lifecycle operation is in progress.' >&2
+        exit 1
+    }
+}
+
 pending_base_version() {
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -200,6 +209,7 @@ case "$operation" in
         ;;
     reboot)
         [ "$#" -eq 0 ] || usage
+        lock_lifecycle
         if /usr/lib/systemd/systemd-sysupdate pending; then
             require_pending_extensions
             exec /usr/bin/env -i PATH="$PATH" \
@@ -209,6 +219,7 @@ case "$operation" in
         ;;
     poweroff)
         [ "$#" -eq 0 ] || usage
+        lock_lifecycle
         exec /usr/bin/env -i PATH="$PATH" /usr/bin/systemctl poweroff
         ;;
     update)
@@ -258,7 +269,9 @@ case "$operation" in
         # Fetch through the base image's own sysupdate component. Only works
         # for anything in the update feed; Watchtower is not, and uses
         # install-extension below.
-        [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+        if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+            usage
+        fi
         extension_permitted "$1" || {
             printf 'Refusing to install extension %s\n' "$1" >&2
             exit 2
@@ -285,8 +298,8 @@ case "$operation" in
         }
         # .raw suffix, outside the extensions directory: dissect reads the
         # format from the suffix, and sysext merges every .raw in that dir.
-        /usr/bin/install -d -m 0700 /var/lib/carbide/staging
-        staging="/var/lib/carbide/staging/$1.upload.raw"
+        /usr/bin/install -d -m 0700 /run/carbide/staging
+        staging="/run/carbide/staging/$1.upload.raw"
         trap '/usr/bin/rm -f "$staging"' EXIT HUP INT TERM
         /usr/bin/head -c 1073741824 >"$staging"
         [ -s "$staging" ] || {

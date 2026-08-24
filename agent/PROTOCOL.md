@@ -184,7 +184,9 @@ image's declared base matches `base`, and only then places it.
 
 ```json
 {"ok": true, "protocol": 1, "name": "chrome", "version": "0.1.59",
- "staged": "/var/lib/extensions/chrome_0.1.59.raw", "acquired": true}
+ "extension_version": "134.0.6998.166", "for_running_base": true,
+ "staged": "/var/lib/extensions/chrome_0.1.59.raw.134.0.6998.166.candidate",
+ "acquired": true}
 ```
 
 A caller should prefer the acquired form and fall back to the supplied form
@@ -273,11 +275,13 @@ MatchPattern=chrome_@v.sysext.raw
 
 [Target]
 Type=regular-file
-Path=/var/lib/extensions
+Path=/var/lib/extensions/.carbide-staging
 MatchPattern=chrome_@v.raw
 InstancesMax=2
 ```
 
+The target path is actually `/var/lib/extensions/.carbide-staging`; the image is
+not merge-visible until the agent has independently validated and promoted it.
 The agent runs `systemd-sysupdate --component=chrome` and inherits TLS, resume,
 and `SHA256SUMS` signature verification from a binary already sealed in the
 base. It adds no HTTP client of its own, which keeps its dependency set — and

@@ -14,44 +14,44 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::ops;
 use crate::protocol::{COMMANDS, Code, Failure, Fields, Reply, Stage};
-use crate::state::{self, State};
+use crate::state::{self, OperationLock, State};
 use crate::system;
 
 /// The descriptor systemd hands a socket-activated service.
 const LISTEN_FD: i32 = 3;
-
-/// One privileged operation at a time.
-///
-/// Activation stops a unit, swaps an image and soaks; a base stage writes the
-/// spare slot. Two of those at once corrupts whichever finishes second, so the
-/// second caller is told `busy` rather than allowed to interleave.
-static BUSY: AtomicBool = AtomicBool::new(false);
-
-struct Guard;
-
-impl Guard {
-    fn take() -> Option<Self> {
-        (!BUSY.swap(true, Ordering::AcqRel)).then_some(Guard)
-    }
-}
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        BUSY.store(false, Ordering::Release);
-    }
-}
 
 fn busy() -> Reply {
     Reply::failed(Failure::new(
         Code::Busy,
         "another privileged operation is in flight",
     ))
+}
+
+fn exclusive(operation: impl FnOnce() -> Reply) -> Reply {
+    let lock = match OperationLock::try_acquire() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return busy(),
+        Err(error) => {
+            return Reply::failed(Failure::new(
+                Code::Failed,
+                format!("could not acquire operation lock: {error}"),
+            ));
+        }
+    };
+    let _lock = lock;
+    if let Err(error) = crate::reconcile_state() {
+        return Reply::failed(Failure::new(
+            Code::Failed,
+            format!("could not reconcile interrupted work: {error}"),
+        ));
+    }
+    operation()
 }
 
 fn dispatch(request: &Value) -> Reply {
@@ -62,18 +62,9 @@ fn dispatch(request: &Value) -> Reply {
     match command.as_str() {
         "hello" => hello(),
         "update-status" => update_status(),
-        "stage-extension" => match Guard::take() {
-            Some(_guard) => stage_extension(request),
-            None => busy(),
-        },
-        "activate-extension" => match Guard::take() {
-            Some(_guard) => activate_extension(request),
-            None => busy(),
-        },
-        "stage-base" => match Guard::take() {
-            Some(_guard) => stage_base(request),
-            None => busy(),
-        },
+        "stage-extension" => exclusive(|| stage_extension(request)),
+        "activate-extension" => exclusive(|| activate_extension(request)),
+        "stage-base" => exclusive(|| stage_base(request)),
         "logs" => logs(request),
         other => Reply::failed(Failure::unsupported(other)),
     }
@@ -147,7 +138,9 @@ fn stage_extension(request: &Value) -> Reply {
             .with("name", staged.name)
             .with("version", staged.version)
             .with("staged", staged.path)
-            .with("acquired", staged.acquired),
+            .with("acquired", staged.acquired)
+            .with("for_running_base", staged.for_running_base)
+            .maybe("extension_version", staged.extension_version),
         Err(failure) => Reply::failed(failure),
     }
 }
@@ -220,13 +213,15 @@ fn logs(request: &Value) -> Reply {
 }
 
 fn serve_connection(stream: UnixStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(stream) => stream,
         Err(_) => return,
     });
     let mut line = String::new();
-    // One request per connection, newline terminated, so a caller cannot hold
-    // the socket open and starve the next one.
+    // One request per connection, newline terminated. The timeout prevents a
+    // caller from retaining a worker forever without completing its frame.
     if reader.read_line(&mut line).is_err() {
         return;
     }
@@ -268,7 +263,9 @@ pub fn serve(path: Option<&str>) -> Result<(), String> {
     };
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => serve_connection(stream),
+            Ok(stream) => {
+                std::thread::spawn(move || serve_connection(stream));
+            }
             Err(error) => eprintln!("carbide-agent: connection failed: {error}"),
         }
     }

@@ -8,14 +8,19 @@
 //! which is the exact failure this component exists to catch.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 pub const STATE_DIR: &str = "/var/lib/carbide/agent";
 const STATE_FILE: &str = "state.json";
+const LOCK_FILE: &str = "operation.lock";
 
 /// Bounded so a long-lived node cannot grow this without limit, while still
 /// being deep enough that a replayed activation cannot invert a rollback.
@@ -33,6 +38,7 @@ pub enum Phase {
     Active,
     Reverting,
     Recovered,
+    Removing,
     Unrecoverable,
 }
 
@@ -113,6 +119,91 @@ impl ExtensionState {
 pub struct State {
     #[serde(default)]
     pub extensions: BTreeMap<String, ExtensionState>,
+}
+
+/// Cross-process ownership of every image or lifecycle mutation.
+///
+/// The API daemon, boot health units, and operator CLI are separate processes;
+/// an in-memory guard cannot stop them from interleaving image swaps.
+pub struct OperationLock {
+    file: File,
+}
+
+unsafe extern "C" {
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
+}
+
+const F_GETFD: i32 = 1;
+const F_SETFD: i32 = 2;
+const FD_CLOEXEC: i32 = 1;
+static OPERATION_LOCK_FD: AtomicI32 = AtomicI32::new(-1);
+
+impl OperationLock {
+    fn open_at(directory: &Path) -> io::Result<File> {
+        fs::create_dir_all(directory)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join(LOCK_FILE))?;
+        Ok(file)
+    }
+
+    fn own(file: File) -> Self {
+        OPERATION_LOCK_FD.store(file.as_raw_fd(), Ordering::Release);
+        Self { file }
+    }
+
+    pub fn acquire() -> io::Result<Self> {
+        let file = Self::open_at(Path::new(STATE_DIR))?;
+        file.lock()?;
+        Ok(Self::own(file))
+    }
+
+    pub fn try_acquire() -> io::Result<Option<Self>> {
+        Self::try_acquire_at(Path::new(STATE_DIR))
+    }
+
+    fn try_acquire_at(directory: &Path) -> io::Result<Option<Self>> {
+        let file = Self::open_at(directory)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self::own(file))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+}
+
+impl Drop for OperationLock {
+    fn drop(&mut self) {
+        let _ = OPERATION_LOCK_FD.compare_exchange(
+            self.file.as_raw_fd(),
+            -1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Keep the lifecycle lock across exec for a trusted mutation subprocess.
+/// Read-only commands and extension-provided health probes retain CLOEXEC.
+pub fn retain_operation_lock(command: &mut Command) {
+    let descriptor = OPERATION_LOCK_FD.load(Ordering::Acquire);
+    if descriptor < 0 {
+        return;
+    }
+    // Safe: this runs after fork in the child and only updates descriptor flags
+    // before exec. It performs no allocation or synchronization.
+    unsafe {
+        command.pre_exec(move || {
+            let flags = fcntl(descriptor, F_GETFD);
+            if flags < 0 || fcntl(descriptor, F_SETFD, flags & !FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 impl State {
@@ -203,7 +294,13 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtensionState, Phase, State};
+    use std::fs;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    use super::{ExtensionState, OperationLock, Phase, State, retain_operation_lock};
+
+    static LOCK_TEST: Mutex<()> = Mutex::new(());
 
     fn terminal_on(version: &str) -> ExtensionState {
         ExtensionState {
@@ -244,5 +341,83 @@ mod tests {
 
         assert!(state.forget_stale_terminals("0.1.45").is_empty());
         assert_eq!(state.extensions["watchtower"].phase, Phase::Unrecoverable);
+    }
+
+    #[test]
+    fn the_operation_lock_excludes_another_process_path() {
+        let _serial = LOCK_TEST.lock().expect("serialize lock tests");
+        let directory =
+            std::env::temp_dir().join(format!("carbide-agent-lock-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let first = OperationLock::try_acquire_at(&directory)
+            .expect("first lock")
+            .expect("unlocked");
+        assert!(
+            OperationLock::try_acquire_at(&directory)
+                .expect("second lock attempt")
+                .is_none()
+        );
+        drop(first);
+        assert!(
+            OperationLock::try_acquire_at(&directory)
+                .expect("lock after release")
+                .is_some()
+        );
+        fs::remove_dir_all(directory).expect("remove lock test directory");
+    }
+
+    #[test]
+    fn a_child_retains_the_operation_lock_if_the_agent_dies() {
+        let _serial = LOCK_TEST.lock().expect("serialize lock tests");
+        let directory = std::env::temp_dir().join(format!(
+            "carbide-agent-child-lock-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let lock = OperationLock::try_acquire_at(&directory)
+            .expect("first lock")
+            .expect("unlocked");
+        let mut command = Command::new("/usr/bin/sleep");
+        command.arg("1");
+        retain_operation_lock(&mut command);
+        let mut child = command.spawn().expect("spawn lock-holding child");
+        drop(lock);
+        assert!(
+            OperationLock::try_acquire_at(&directory)
+                .expect("lock while child runs")
+                .is_none()
+        );
+        child.wait().expect("wait for child");
+        assert!(
+            OperationLock::try_acquire_at(&directory)
+                .expect("lock after child exits")
+                .is_some()
+        );
+        fs::remove_dir_all(directory).expect("remove lock test directory");
+    }
+
+    #[test]
+    fn an_untrusted_child_does_not_retain_the_operation_lock() {
+        let _serial = LOCK_TEST.lock().expect("serialize lock tests");
+        let directory = std::env::temp_dir().join(format!(
+            "carbide-agent-untrusted-lock-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        let lock = OperationLock::try_acquire_at(&directory)
+            .expect("first lock")
+            .expect("unlocked");
+        let mut child = Command::new("/usr/bin/sleep")
+            .arg("1")
+            .spawn()
+            .expect("spawn untrusted child");
+        drop(lock);
+        assert!(
+            OperationLock::try_acquire_at(&directory)
+                .expect("lock while untrusted child runs")
+                .is_some()
+        );
+        child.wait().expect("wait for child");
+        fs::remove_dir_all(directory).expect("remove lock test directory");
     }
 }

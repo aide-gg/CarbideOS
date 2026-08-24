@@ -11,6 +11,8 @@ case "${1-}" in
     *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
 esac
 version=$(tr -d '[:space:]' <mkosi.version)
+cargo test --locked --manifest-path agent/Cargo.toml
+cargo clippy --locked --all-targets --manifest-path agent/Cargo.toml -- -D warnings
 if [ "$variant" = fleet ]; then
     release="$PWD/dist/fleet/carbideos-${version}"
     update_feed="$PWD/dist/update-feed/fleet"
@@ -241,8 +243,13 @@ if [ ! -s "$extension_compressed" ]; then
 fi
 # Published compressed, so expand it here: everything below reads a partition
 # table, and this also proves the artifact a node will fetch decompresses.
-extension_artifact="$verify_home/${extension_name}.sysext.raw"
-zstd -dqf -o "$extension_artifact" "$extension_compressed"
+    extension_artifact="$verify_home/${extension_name}.sysext.raw"
+    zstd -dqf -o "$extension_artifact" "$extension_compressed"
+    if [ "$(wc -c <"$extension_artifact")" -gt $((1024 * 1024 * 1024)) ]; then
+        printf '%s system extension exceeds the 1 GiB acquisition limit.\n' \
+            "$extension_name" >&2
+        exit 1
+    fi
 if ! sudo systemd-dissect "$extension_artifact" | grep -q 'signed'; then
     printf '%s is not verity signed.\n' "$extension_name" >&2
     exit 1

@@ -10,8 +10,12 @@
 # risks the node that carries them, so the mechanism is proven here first with
 # something disposable.
 #
-#   ./extensions/selftest/build healthy 1
-#   ./extensions/selftest/build broken  2
+#   ./extensions/selftest/build healthy   1
+#   ./extensions/selftest/build broken    2
+#   ./extensions/selftest/build hanging   3
+#   ./extensions/selftest/build soak-fail 4
+#   ./extensions/selftest/build no-ruleset 5
+#   ./extensions/selftest/build missing-unit 6
 #
 # "healthy" comes up and stays up. "broken" fails to start, which is what the
 # agent has to notice and undo.
@@ -23,9 +27,9 @@ cd "$(dirname "$0")/../.."
 behaviour=${1:-healthy}
 revision=${2:-1}
 case "$behaviour" in
-    healthy|broken) ;;
+    healthy|broken|hanging|soak-fail|no-ruleset|missing-unit) ;;
     *)
-        printf 'Usage: %s [healthy|broken] [REVISION]\n' "$0" >&2
+        printf 'Usage: %s [healthy|broken|hanging|soak-fail|no-ruleset|missing-unit] [REVISION]\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -55,10 +59,31 @@ install -d \
     "$root/usr/lib/extension-release.d" \
     "$output"
 
-if [ "$behaviour" = healthy ]; then
-    start_command=/usr/bin/true
-else
-    start_command=/usr/bin/false
+case "$behaviour" in
+    healthy|no-ruleset|missing-unit)
+        service_type=oneshot
+        remain_after_exit=yes
+        start_command=/usr/bin/true
+        ;;
+    broken)
+        service_type=oneshot
+        remain_after_exit=yes
+        start_command=/usr/bin/false
+        ;;
+    hanging)
+        service_type=notify
+        remain_after_exit=no
+        start_command='/usr/bin/sleep infinity'
+        ;;
+    soak-fail)
+        service_type=simple
+        remain_after_exit=no
+        start_command='/usr/bin/sleep 3'
+        ;;
+esac
+health_unit=carbide-selftest.service
+if [ "$behaviour" = missing-unit ]; then
+    health_unit=carbide-selftest-missing.service
 fi
 
 cat >"$root/usr/lib/systemd/system/carbide-selftest.service" <<EOF
@@ -67,8 +92,8 @@ cat >"$root/usr/lib/systemd/system/carbide-selftest.service" <<EOF
 Description=CarbideOS extension self-test ($behaviour revision $revision)
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=$service_type
+RemainAfterExit=$remain_after_exit
 ExecStart=$start_command
 
 [Install]
@@ -91,10 +116,11 @@ chmod 0755 "$root/usr/libexec/carbide-selftest-health"
 
 # Deliberately short timings. This extension exists to be cycled repeatedly,
 # not to model a real service's startup.
-cat >"$root/usr/lib/carbide/health.d/selftest.conf" <<'EOF'
+if [ "$behaviour" != no-ruleset ]; then
+    cat >"$root/usr/lib/carbide/health.d/selftest.conf" <<EOF
 # SPDX-License-Identifier: AGPL-3.0-or-later
 [Extension]
-Unit=carbide-selftest.service
+Unit=$health_unit
 ReadyTimeoutSec=15
 StartAttempts=2
 HealthCommand=/usr/libexec/carbide-selftest-health
@@ -102,6 +128,7 @@ HealthIntervalSec=2
 HealthTimeoutSec=5
 SoakSec=6
 EOF
+fi
 
 cat >"$root/usr/lib/extension-release.d/extension-release.selftest" <<EOF
 ID=carbideos

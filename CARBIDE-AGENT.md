@@ -18,7 +18,7 @@ The agent is a **generic extension supervisor**. It does not know what any
 extension does, and it must never be taught. CarbideOS is a general-purpose
 immutable server OS; the payload is cargo.
 
-It does exactly four things:
+It does five things:
 
 1. Merge extensions at boot and reload the service manager, so units arriving
    from an extension become visible.
@@ -26,17 +26,22 @@ It does exactly four things:
    each extension ships inside itself.
 3. Restore the retained known-good image when an extension fails.
 4. Report the result, and withhold boot assessment when the node cannot work.
+5. Stage base and extension artifacts through sealed `systemd-sysupdate`
+   configuration, or accept a caller-supplied local image and digest.
 
 ### Non-goals
 
 These are boundaries, not omissions. Violating any of them defeats the purpose
 of having a small recovery component.
 
-- **No fetching.** The agent never downloads anything. Whoever owns the
-  credentials owns the fetching.
+- **No caller-selected network access.** The agent only delegates acquisition
+  to sealed `systemd-sysupdate` components. It accepts no URL. An artifact that
+  needs credentials is fetched by the caller and supplied as a local path and
+  digest.
 - **No credentials.** No API keys, no tokens, no message bus. A component that
   holds a secret is a component whose compromise costs something.
-- **No network.** Recovery must work on a node with no route to anywhere.
+- **No network dependency for recovery.** Acquisition may use a sealed source;
+  restoring known-good must work with no route to anywhere.
 - **No extension semantics.** No hardcoded unit names, no product names.
 - **No fleet logic.** Scheduling, rollout policy, canary selection and job
   handling belong to the payload.
@@ -110,9 +115,10 @@ SoakSec=120
 All images live on the encrypted state partition.
 
 ```
-/var/lib/extensions/<name>.raw                       active, merged
-/var/lib/extensions/<name>.raw.<version>.rollback    retained known-good
-/var/lib/extensions/<name>.raw.<version>.candidate   staged, not yet active
+/var/lib/extensions/<name>_<base>.raw                       active, merged
+/var/lib/extensions/<name>_<base>.raw.<version>.rollback    retained known-good
+/var/lib/extensions/<name>_<base>.raw.<version>.candidate   staged, not yet active
+/var/lib/extensions/.carbide-staging/*.raw                  not merge-visible
 ```
 
 **The suffixes are load-bearing.** `systemd-sysext` merges every `*.raw` in the
@@ -125,8 +131,10 @@ floor rather than competing for leftover space.
 
 ## Activation
 
-The payload stages a verified candidate and asks the agent to activate it. The
-agent never fetches; it only arbitrates between images already present.
+The payload can supply an image and digest, or ask the agent to acquire one
+through a sealed sysupdate component. Both routes land outside the merge-visible
+directory, receive the same signature, identity and base checks, and then enter
+the same candidate activation transaction.
 
 ```
 idle
@@ -189,11 +197,11 @@ directory.
 Per supervised extension:
 
 - required
-- active version and digest
-- known-good version and digest
-- candidate version and digest
+- active version
+- known-good version
+- candidate version
 - current phase and request id
-- last health result and timestamp
+- last health result
 - last failure reason
 
 Completed request ids are retained, bounded, so a replayed activation cannot
@@ -208,6 +216,7 @@ carbide-agent health-gate              verify every required extension
 carbide-agent activate NAME VERSION    promote a staged candidate
 carbide-agent adopt NAME VERSION       supervise an already-active known-good image
 carbide-agent rollback NAME            return to the known-good image
+carbide-agent remove NAME              remove an optional extension
 carbide-agent require NAME             record that this node must have NAME
 carbide-agent unrequire NAME           stop requiring NAME
 carbide-agent reset NAME               clear a terminal state
@@ -244,11 +253,15 @@ not recover itself, nothing ships.
 
 `extensions/selftest/build` produces a disposable signed extension for exactly
 this. It carries no payload beyond a trivial unit and its ruleset, and builds
-in two behaviours:
+healthy, immediate-failure, readiness-timeout, soak-failure, and missing-ruleset
+behaviours.
 
 ```bash
 ./extensions/selftest/build healthy 1
 ./extensions/selftest/build broken  2
+./extensions/selftest/build hanging 3
+./extensions/selftest/build soak-fail 4
+./extensions/selftest/build no-ruleset 5
 ```
 
 Proving recovery with the real payload would require working fleet credentials
@@ -257,10 +270,20 @@ something disposable first. Its health probe fails whenever
 `/var/lib/carbide/selftest-unhealthy` exists, which makes "started but not
 actually working" reproducible at runtime without rebuilding.
 
-Proven so far by `extensions/selftest/acceptance` on 0.1.39, 16 checks passing:
-1, 4, 6, 10 and 12 below, plus the reset path and the guarantee that exactly
-one image ends in `.raw`. The rest remain open, and the power-loss cases in
-particular need deliberate interruption rather than a scripted run.
+Current-tree proof on development VM 135, running CarbideOS 0.1.53:
+
+- `extensions/selftest/acceptance`: **37 passed, 0 failed**, including a
+  candidate whose missing unit cannot prevent known-good restoration.
+- `extensions/selftest/interruption-acceptance`: activation killed in persisted
+  `starting`; the next health gate restored revision 1 and removed the candidate.
+- The earlier counted-base test spent `+3-0` through `+0-3` and returned to the
+  retained base unattended.
+
+The exact hard-power-loss boundaries during staging and between publication and
+refresh still merit destructive fault injection. The implementation no longer
+publishes partial files: it writes a non-merge-visible sibling, `fsync`s it,
+atomically renames it, and `fsync`s the directory; persisted transient phases
+are reconciled before any later mutation.
 
 1. Valid activation succeeds without a reboot.
 2. Extension with an invalid signature is refused before the active pointer

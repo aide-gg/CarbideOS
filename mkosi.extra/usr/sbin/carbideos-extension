@@ -21,32 +21,21 @@ esac
 # Published compressed; systemd-pull decompresses a raw image by its suffix.
 artifact="${name}_${VERSION_ID}.sysext.raw.zst"
 
-# Scoped to the base it was built for, matching install-extension, so an image
-# for the running base and one for a pending base can sit here together.
-target="/var/lib/extensions/${name}_${VERSION_ID}.raw"
-policy=root=verity+signed+absent:usr=verity+signed+absent
 case "$action" in
     install)
-        install -d -m 0755 /var/lib/extensions
-        temporary=$(mktemp "/var/lib/extensions/.$name.XXXXXX")
+        install -d -m 0700 /run/carbide/staging
+        temporary=$(mktemp "/run/carbide/staging/${name}.XXXXXX.raw")
         trap 'rm -f "$temporary"' EXIT HUP INT TERM
         /usr/lib/systemd/systemd-pull raw --direct --verify=no \
             --class=sysext --size-max=1G \
             "https://updates.aide.gg/carbideos/$artifact" "$temporary"
         chmod 0644 "$temporary"
-        mv -f "$temporary" "$target"
-        # An unscoped image predates scoping and merges alongside this one,
-        # leaving the node running two copies of the same extension.
-        rm -f "/var/lib/extensions/$name.raw"
-        if ! systemd-sysext --image-policy="$policy" refresh; then
-            rm -f "$target"
-            systemd-sysext --image-policy="$policy" refresh || true
-            exit 1
-        fi
+        digest=$(sha256sum "$temporary" | awk '{print $1}')
+        /usr/bin/carbide-agent stage-extension "$name" --base "$VERSION_ID" \
+            --path "$temporary" --digest "$digest" --activate
         ;;
     remove)
-        rm -f "$target" "/var/lib/extensions/$name.raw"
-        systemd-sysext --image-policy="$policy" refresh
+        /usr/bin/carbide-agent remove "$name"
         ;;
     *)
         printf 'Unknown action: %s\n' "$action" >&2

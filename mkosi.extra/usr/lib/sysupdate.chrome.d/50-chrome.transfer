@@ -22,11 +22,9 @@ MatchPattern=chrome_@v.sysext.raw.zst
 
 [Target]
 Type=regular-file
-Path=/var/lib/extensions
-# An underscore, because systemd derives an extension's name from its image
-# file name and strips a version only after that separator.
+# The agent validates and promotes this from a hidden, non-merge-visible
+# directory. Sysupdate must never write directly over a running extension.
+Path=/var/lib/extensions/.carbide-staging
 MatchPattern=chrome_@v.raw
 Mode=0644
-# The outgoing base keeps its Chrome while the incoming one has its own, which
-# is what lets a base rollback find a working extension already in place.
 InstancesMax=2
