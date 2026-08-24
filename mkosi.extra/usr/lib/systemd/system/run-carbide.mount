@@ -3,6 +3,9 @@
 [Unit]
 Description=Ephemeral CarbideOS runtime
 Documentation=man:systemd.mount(5)
+Requires=carbideos-runtime-init.service
+After=carbideos-runtime-init.service
+RequiresMountsFor=/var/lib/watchtower
 
 # Owned by the base rather than by an extension, because the base's agent
 # socket listens on a path inside it.
@@ -21,7 +24,9 @@ Documentation=man:systemd.mount(5)
 # the base is guaranteed to be there that early.
 
 [Mount]
-What=tmpfs
+What=/var/lib/watchtower/runtime
 Where=/run/carbide
-Type=tmpfs
-Options=mode=0755,size=1G,nosuid,nodev
+Type=none
+# Bun reads ACE's TypeScript as data; the executables it invokes live in the
+# immutable system extensions rather than this boot-cleared tree.
+Options=bind,noexec,nosuid,nodev

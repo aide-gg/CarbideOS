@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Reset the disk-backed CarbideOS runtime
+DefaultDependencies=no
+Requires=carbideos-var-init.service
+After=carbideos-var-init.service
+Before=run-carbide.mount local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mkdir -p /var/lib/watchtower
+ExecStart=/usr/bin/rm -rf -- /var/lib/watchtower/runtime
+ExecStart=/usr/bin/install -d -m 0755 -o root -g root /var/lib/watchtower/runtime
+RemainAfterExit=yes

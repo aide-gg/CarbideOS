@@ -117,7 +117,7 @@ if ! grep -Fqx 'WantedBy=multi-user.target' \
     printf '%s\n' 'Required extensions must start every boot, and must not reboot on failure.' >&2
     exit 1
 fi
-# The agent socket listens inside a tmpfs an extension mounts. Without an
+# The agent socket listens inside an ephemeral mount. Without an
 # ordering the two race, and a socket created first is hidden when the mount
 # lands on top, which reads to a caller as "this base has no agent".
 if ! grep -Fqx 'RequiresMountsFor=/run/carbide' \
@@ -132,6 +132,17 @@ fi
 if [ ! -f mkosi.extra/usr/lib/systemd/system/run-carbide.mount ] || \
    grep -Fq 'dist/run-carbide.mount' extensions/watchtower/build; then
     printf '%s\n' 'The runtime mount must ship in the base, not in an extension.' >&2
+    exit 1
+fi
+if ! grep -Fqx 'What=/var/lib/watchtower/runtime' \
+        mkosi.extra/usr/lib/systemd/system/run-carbide.mount || \
+   grep -Fq 'What=tmpfs' \
+        mkosi.extra/usr/lib/systemd/system/run-carbide.mount || \
+   ! grep -Fqx 'Options=bind,noexec,nosuid,nodev' \
+        mkosi.extra/usr/lib/systemd/system/run-carbide.mount || \
+   ! grep -Fqx 'ExecStart=/usr/bin/rm -rf -- /var/lib/watchtower/runtime' \
+        mkosi.extra/usr/lib/systemd/system/carbideos-runtime-init.service; then
+    printf '%s\n' 'The runtime must be disk-backed and cleared before each boot mount.' >&2
     exit 1
 fi
 # A supplied image declares the base it was built for, and that has to be
