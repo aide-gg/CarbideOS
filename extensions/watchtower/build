@@ -55,7 +55,7 @@ if [ -n "${CARBIDEOS_ACE_RELEASE_PUBLIC_KEY:-}" ]; then
     printf 'Trusting ACE releases signed by %s\n' "$release_pub"
 fi
 
-for command in cargo curl gpg mkfs.erofs openssl sha256sum systemd-repart unzip; do
+for command in cargo curl gpg mkfs.erofs openssl sha256sum systemd-dissect systemd-repart unzip; do
     command -v "$command" >/dev/null 2>&1 || {
         printf 'Missing required command: %s\n' "$command" >&2
         exit 1
