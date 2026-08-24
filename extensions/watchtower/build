@@ -172,8 +172,10 @@ mkfs.erofs --quiet --all-root -T "$epoch" \
 # enough to be safe without being worth reclaiming.
 erofs_bytes=$(stat -c%s "$work/root.erofs")
 verity_bytes=$(( erofs_bytes / 64 + 1024 * 1024 ))
-# GPT keeps a header at each end and repart aligns partitions, so leave room.
-image_bytes=$(( erofs_bytes + verity_bytes + 16384 + 2 * 1024 * 1024 ))
+# GPT, partition alignment, and repart's signature partition need space beyond
+# the payload sizes. Keep enough reserve that a small binary increase does not
+# make the release pipeline fail before the next sizing adjustment.
+image_bytes=$(( erofs_bytes + verity_bytes + 16384 + 16 * 1024 * 1024 ))
 image_mib=$(( (image_bytes + 1048575) / 1048576 ))
 
 definitions="$work/repart.d"
