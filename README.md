@@ -4,8 +4,7 @@
 
 CarbideOS is a minimal, terminal-only Fedora appliance image. The current
 implementation provides the signed base image, first-boot disk provisioning,
-and manually triggered A/B base OS updates. It contains no AIde, Watchtower,
-ACE, Chrome, desktop, or fleet provisioning code.
+and manually triggered A/B base OS updates. 
 
 ## Security Properties
 
