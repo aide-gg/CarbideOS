@@ -108,24 +108,44 @@ fn adopt(arguments: &[String]) -> Result<(), String> {
         .get(1)
         .ok_or("usage: carbide-agent adopt NAME VERSION")?;
     let mut state = State::load().map_err(|error| error.to_string())?;
-    adopt_active(&mut state, name, version)?;
+    adopt_active(&mut state, name, version).map_err(|error| error.to_string())?;
     println!("{name}: adopted active {version} as known-good");
     Ok(())
 }
 
-fn adopt_active(state: &mut State, name: &str, version: &str) -> Result<(), String> {
+#[derive(Debug)]
+enum AdoptError {
+    /// The image declares no way to tell it works, so it cannot be proven
+    /// known-good. Images published before their ruleset existed look like this.
+    NoRuleset(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for AdoptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRuleset(error) => write!(f, "active image has no usable ruleset: {error}"),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+fn adopt_active(state: &mut State, name: &str, version: &str) -> Result<(), AdoptError> {
+    let ruleset =
+        Ruleset::load_named(name).map_err(|error| AdoptError::NoRuleset(error.to_string()))?;
     let active = system::active_path(name);
     if !active.exists() {
-        return Err(format!("no active image at {}", active.display()));
+        return Err(AdoptError::Failed(format!(
+            "no active image at {}",
+            active.display()
+        )));
     }
-
-    let ruleset = Ruleset::load_named(name)
-        .map_err(|error| format!("active image has no usable ruleset: {error}"))?;
-    healthy_now(&ruleset)?;
+    healthy_now(&ruleset).map_err(AdoptError::Failed)?;
 
     let retained = system::rollback_path(name, version);
     if !retained.exists() {
-        system::durable_copy(&active, &retained).map_err(|error| error.to_string())?;
+        system::durable_copy(&active, &retained)
+            .map_err(|error| AdoptError::Failed(error.to_string()))?;
     }
     let entry = state.entry(name);
     entry.required = true;
@@ -135,7 +155,9 @@ fn adopt_active(state: &mut State, name: &str, version: &str) -> Result<(), Stri
     entry.terminal_os_version = None;
     entry.last_health = Some("healthy".into());
     entry.last_failure = None;
-    state.store().map_err(|error| error.to_string())?;
+    state
+        .store()
+        .map_err(|error| AdoptError::Failed(error.to_string()))?;
     Ok(())
 }
 
@@ -678,13 +700,22 @@ pub fn activate_extension(
         && system::active_path(name).exists()
         && let Some(current) = ops::merged_version(name)
     {
-        adopt_active(&mut state, name, &current).map_err(|error| {
-            Failure::new(
-                Code::Failed,
-                format!("could not adopt the active image: {error}"),
-            )
-            .at(Stage::Checking)
-        })?;
+        match adopt_active(&mut state, name, &current) {
+            Ok(()) => {}
+            // Such an image can never be adopted, so insisting would block
+            // every upgrade away from it. Replace it as a first install would.
+            Err(AdoptError::NoRuleset(error)) => eprintln!(
+                "{name}: not adopting active {current}, which has no usable ruleset ({error}); \
+                 the candidate has no known-good image to fall back to"
+            ),
+            Err(error) => {
+                return Err(Failure::new(
+                    Code::Failed,
+                    format!("could not adopt the active image: {error}"),
+                )
+                .at(Stage::Checking));
+            }
+        }
     }
 
     let candidate_size = std::fs::metadata(&candidate)
@@ -947,4 +978,19 @@ fn status() -> Result<(), String> {
     let encoded = serde_json::to_string_pretty(&state).map_err(|error| error.to_string())?;
     println!("{encoded}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AdoptError, State, adopt_active};
+
+    /// Activation treats this as "replace without a known-good", so it has to
+    /// be told apart from adoption failing for any other reason.
+    #[test]
+    fn an_image_without_a_ruleset_is_reported_as_such() {
+        let mut state = State::default();
+        let outcome = adopt_active(&mut state, "carbide-agent-test-no-such-extension", "1");
+        assert!(matches!(outcome, Err(AdoptError::NoRuleset(_))));
+        assert!(state.extensions.is_empty());
+    }
 }

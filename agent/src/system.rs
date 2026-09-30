@@ -499,6 +499,32 @@ pub fn acquire_component(name: &str, version: Option<&str>) -> io::Result<Finish
     capture_mutating(SYSUPDATE, &args)
 }
 
+/// Every version a component's feed and target hold, as `list` reports them.
+pub fn list_component(name: &str) -> io::Result<Finished> {
+    let component = format!("--component={name}");
+    capture(SYSUPDATE, &[component.as_str(), "--json=short", "list"])
+}
+
+/// The `all` array from `list --json=short`. Progress goes to stderr, but
+/// the JSON is read from the last line that parses in case anything else
+/// reaches stdout.
+pub fn parse_listed_versions(stdout: &str) -> Option<Vec<String>> {
+    stdout.lines().rev().find_map(|line| {
+        let parsed = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+        let all = parsed.get("all")?.as_array()?;
+        Some(
+            all.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        )
+    })
+}
+
+/// Remove whatever sysupdate left for `name` in the staging directory.
+pub fn clear_staged(name: &str) -> io::Result<()> {
+    prune_matching_in(Path::new(STAGING_DIR), &format!("{name}_"), ".raw", None)
+}
+
 /// Download and install a base image into the spare slot.
 pub fn stage_base(version: Option<&str>) -> io::Result<Finished> {
     let mut args = vec!["update"];
@@ -916,8 +942,8 @@ mod tests {
 
     use super::{
         ImageRelease, activation_space, durable_copy, durable_copy_file, extension_name,
-        parse_sysext_release, prune_matching_in, prune_transaction_files_in, staging_space,
-        version_valid,
+        parse_listed_versions, parse_sysext_release, prune_matching_in, prune_transaction_files_in,
+        staging_space, version_valid,
     };
 
     fn temporary_directory(name: &str) -> std::path::PathBuf {
@@ -979,6 +1005,17 @@ mod tests {
         assert!(!version_valid("0.1/58"));
         assert!(!version_valid(".hidden"));
         assert!(!version_valid("has space"));
+    }
+
+    #[test]
+    fn listed_versions_are_read_from_the_json_line() {
+        let stdout = "{\"current\":null,\"all\":[\"0.3.5-1\",\"0.3.5\"],\"appstreamUrls\":[]}\n";
+        assert_eq!(
+            parse_listed_versions(stdout),
+            Some(vec!["0.3.5-1".to_string(), "0.3.5".to_string()])
+        );
+        assert_eq!(parse_listed_versions("progress\n"), None);
+        assert_eq!(parse_listed_versions(""), None);
     }
 
     /// systemd reports a merged extension under its image file name. A scoped

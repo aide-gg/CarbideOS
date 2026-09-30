@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-.PHONY: keys production-keys production-sysext-cert playground-keys build debug fleet playground extensions watchtower-extension chrome-extension ace-package aide-extensions fleet-extensions playground-extensions package fleet-package playground-package sign fleet-sign playground-sign verify pipeline fleet-pipeline playground-pipeline publish-r2 prune-r2 fleet-install-watchtower publish-fleet publish-playground installer fleet-installer playground-installer installer-preview clean clean-tools
+.PHONY: keys production-keys production-sysext-cert playground-keys build debug fleet playground extensions watchtower-extension chrome-extension ace-package aide-extensions fleet-extensions playground-extensions package fleet-package playground-package package-extensions fleet-package-extensions playground-package-extensions sign fleet-sign playground-sign verify pipeline fleet-pipeline playground-pipeline publish-r2 prune-r2 fleet-install-watchtower publish-fleet publish-playground installer fleet-installer playground-installer installer-preview clean clean-tools
 
 keys:
 	./scripts/provision-keys
@@ -54,6 +54,15 @@ fleet-package:
 
 playground-package:
 	./scripts/package --playground
+
+package-extensions:
+	./scripts/package --extensions-only
+
+fleet-package-extensions:
+	./scripts/package --fleet --extensions-only
+
+playground-package-extensions:
+	./scripts/package --playground --extensions-only
 
 sign:
 	./scripts/sign

@@ -90,6 +90,14 @@ pub fn stage_extension(name: &str, base: Option<&str>, source: Source) -> Result
 }
 
 fn acquire(name: &str, base: &str, version: Option<&str>) -> Result<Staged, Failure> {
+    if let Some(version) = version
+        && !system::version_valid(version)
+    {
+        return Err(Failure::new(
+            Code::Malformed,
+            format!("unusable extension version {version:?}"),
+        ));
+    }
     if !system::components().iter().any(|c| c == name) {
         return Err(Failure::new(
             Code::NotFound,
@@ -108,11 +116,14 @@ fn acquire(name: &str, base: &str, version: Option<&str>) -> Result<Staged, Fail
     // before sysupdate starts guarantees even the largest accepted download
     // cannot consume the filesystem's transaction margin.
     require_space(MAX_ACQUIRED_IMAGE.saturating_add(16 * 1024 * 1024))?;
-    // Extension images are named for the base they target, so the version
-    // sysupdate selects on is that base. Otherwise it takes the newest in the
-    // feed, which belongs to whichever base was published last.
-    let selector = version.unwrap_or(base);
-    let finished = system::acquire_component(name, Some(selector)).map_err(|error| {
+    // Extension images are named for the base they target, so sysupdate has
+    // to be told which version to take. Left to itself it takes the newest in
+    // the feed, which belongs to whichever base was published last.
+    let selected = match version {
+        Some(version) => version.to_string(),
+        None => resolve_revision(name, base)?,
+    };
+    let finished = system::acquire_component(name, Some(&selected)).map_err(|error| {
         Failure::new(
             Code::Failed,
             format!("could not run systemd-sysupdate: {error}"),
@@ -120,6 +131,7 @@ fn acquire(name: &str, base: &str, version: Option<&str>) -> Result<Staged, Fail
         .at(Stage::Staging)
     })?;
     if !finished.ok {
+        let _ = system::clear_staged(name);
         return Err(
             Failure::new(Code::Failed, format!("could not acquire {name}"))
                 .at(Stage::Staging)
@@ -132,34 +144,35 @@ fn acquire(name: &str, base: &str, version: Option<&str>) -> Result<Staged, Fail
     // Sysupdate writes into the hidden staging directory. Treat those bytes
     // exactly like a caller-supplied image from here onward: validate their
     // signed DDI metadata, then promote through the candidate lifecycle.
-    let staged = Path::new(STAGING_DIR).join(format!("{name}_{base}.raw"));
-    if !staged.exists() {
-        return Err(Failure::new(
-            Code::Failed,
-            format!("{name} was acquired but no image for {base} is present"),
-        )
-        .at(Stage::Staging)
-        .command(finished.command)
-        .stderr(finished.stdout));
-    }
-    let downloaded_size = std::fs::metadata(&staged)
-        .map_err(|error| Failure::new(Code::Failed, error.to_string()).at(Stage::Staging))?
-        .len();
-    if downloaded_size > MAX_ACQUIRED_IMAGE {
-        let _ = system::durable_remove(&staged);
-        return Err(Failure::new(
-            Code::NoSpace,
-            format!("acquired image is {downloaded_size} bytes; limit is {MAX_ACQUIRED_IMAGE}"),
-        )
-        .at(Stage::Staging));
-    }
-    let placed = match validate_and_place(name, Some(base), &staged) {
-        Ok(placed) => placed,
-        Err(failure) => {
-            let _ = system::durable_remove(&staged);
-            return Err(failure);
+    let staged = Path::new(STAGING_DIR).join(format!("{name}_{selected}.raw"));
+    let placed = (|| {
+        if !staged.exists() {
+            return Err(Failure::new(
+                Code::Failed,
+                format!("{name} was acquired but no image for {selected} is present"),
+            )
+            .at(Stage::Staging)
+            .command(finished.command)
+            .stderr(finished.stdout));
         }
-    };
+        let downloaded_size = std::fs::metadata(&staged)
+            .map_err(|error| Failure::new(Code::Failed, error.to_string()).at(Stage::Staging))?
+            .len();
+        if downloaded_size > MAX_ACQUIRED_IMAGE {
+            return Err(Failure::new(
+                Code::NoSpace,
+                format!("acquired image is {downloaded_size} bytes; limit is {MAX_ACQUIRED_IMAGE}"),
+            )
+            .at(Stage::Staging));
+        }
+        // A revision is a rebuild for the same base, so the image must still
+        // declare `base` itself.
+        validate_and_place(name, Some(base), &staged)
+    })();
+    // Whatever else sysupdate wrote here is never read; the placed image has
+    // already moved out.
+    let _ = system::clear_staged(name);
+    let placed = placed?;
     Ok(Staged {
         name: name.to_string(),
         version: placed.base,
@@ -168,6 +181,73 @@ fn acquire(name: &str, base: &str, version: Option<&str>) -> Result<Staged, Fail
         extension_version: placed.extension_version,
         for_running_base: placed.for_running_base,
     })
+}
+
+/// The newest image the feed offers for `base`.
+///
+/// A base's first image is `<base>` and is never replaced, because agents
+/// sealed into older bases ask for exactly that. Rebuilds are `<base>-<n>`.
+fn resolve_revision(name: &str, base: &str) -> Result<String, Failure> {
+    let listed = system::list_component(name).map_err(|error| {
+        Failure::new(
+            Code::Failed,
+            format!("could not run systemd-sysupdate: {error}"),
+        )
+        .at(Stage::Staging)
+    })?;
+    if !listed.ok {
+        return Err(
+            Failure::new(Code::Failed, format!("could not list {name} versions"))
+                .at(Stage::Staging)
+                .command(listed.command)
+                .exit_code(listed.code)
+                .stderr(listed.stderr),
+        );
+    }
+    let Some(versions) = system::parse_listed_versions(&listed.stdout) else {
+        return Err(Failure::new(
+            Code::Failed,
+            format!("could not read the {name} versions systemd-sysupdate listed"),
+        )
+        .at(Stage::Staging)
+        .command(listed.command)
+        .stderr(listed.stdout));
+    };
+    newest_for_base(base, &versions).ok_or_else(|| {
+        Failure::new(
+            Code::Failed,
+            format!("the feed offers no {name} image for {base}"),
+        )
+        .at(Stage::Staging)
+        .command(listed.command)
+    })
+}
+
+/// Canonical positive decimal only, so `-1` and `-01` cannot both exist.
+fn revision_number(revision: &str) -> Option<u64> {
+    if revision.is_empty()
+        || revision.starts_with('0')
+        || !revision.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    revision.parse().ok()
+}
+
+/// Pick `<base>` or the highest `<base>-<n>` from a list of feed versions.
+fn newest_for_base(base: &str, versions: &[String]) -> Option<String> {
+    versions
+        .iter()
+        .filter_map(|version| {
+            let revision = if version == base {
+                0
+            } else {
+                revision_number(version.strip_prefix(base)?.strip_prefix('-')?)?
+            };
+            Some((revision, version))
+        })
+        .max_by_key(|(revision, _)| *revision)
+        .map(|(_, version)| version.clone())
 }
 
 fn supplied(name: &str, base: Option<&str>, path: &Path, digest: &str) -> Result<Staged, Failure> {
@@ -591,4 +671,70 @@ fn verify_extensions_for(pending: &str) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_for_base;
+
+    fn list(versions: &[&str]) -> Vec<String> {
+        versions.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn an_unrevisioned_image_is_chosen_when_it_is_the_only_one() {
+        assert_eq!(
+            newest_for_base("0.3.5", &list(&["0.3.4", "0.3.5", "0.3.6"])),
+            Some("0.3.5".into())
+        );
+    }
+
+    #[test]
+    fn the_highest_revision_for_the_base_wins() {
+        assert_eq!(
+            newest_for_base(
+                "0.3.5",
+                &list(&["0.3.5-2", "0.3.5", "0.3.5-10", "0.3.6-11"])
+            ),
+            Some("0.3.5-10".into())
+        );
+        assert_eq!(
+            newest_for_base("0.3.5", &list(&["0.3.5-1"])),
+            Some("0.3.5-1".into())
+        );
+    }
+
+    #[test]
+    fn a_longer_base_sharing_the_prefix_does_not_match() {
+        assert_eq!(
+            newest_for_base("0.3.5", &list(&["0.3.50-1", "0.3.50", "0.3.5"])),
+            Some("0.3.5".into())
+        );
+        assert_eq!(
+            newest_for_base("0.3.5", &list(&["0.3.50-1", "0.3.6"])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_suffix_that_is_not_a_revision_is_ignored() {
+        assert_eq!(
+            newest_for_base(
+                "0.3.5",
+                &list(&[
+                    "0.3.5",
+                    "0.3.5-x",
+                    "0.3.5-",
+                    "0.3.5-0",
+                    "0.3.5-01",
+                    "0.3.5-1a",
+                    "0.3.5-1-2",
+                    "0.3.5+1",
+                    "0.3.5-1.1",
+                ])
+            ),
+            Some("0.3.5".into())
+        );
+        assert_eq!(newest_for_base("0.3.5", &list(&[])), None);
+    }
 }

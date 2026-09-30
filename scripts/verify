@@ -236,11 +236,26 @@ verity_artifact=$1
 verity_sig_artifact="$update_feed/${update_prefix}_${version}.verity-sig.raw.zst"
 uki_artifact="$update_feed/${update_prefix}_${version}.efi"
 for extension_name in $feed_extensions; do
-extension_compressed="$update_feed/${extension_name}_${version}.sysext.raw.zst"
-if [ ! -s "$extension_compressed" ]; then
+if [ ! -s "$update_feed/${extension_name}_${version}.sysext.raw.zst" ]; then
     printf 'Missing %s system extension artifact.\n' "$extension_name" >&2
     exit 1
 fi
+# Revisions too: a node on this base takes the newest one.
+for extension_compressed in \
+    "$update_feed/${extension_name}_${version}.sysext.raw.zst" \
+    "$update_feed/${extension_name}_${version}-"*.sysext.raw.zst; do
+[ -e "$extension_compressed" ] || continue
+# Only <base>-<n>; any other suffix could belong to a different base.
+suffix=${extension_compressed##*/}
+suffix=${suffix%.sysext.raw.zst}
+suffix=${suffix#"${extension_name}_${version}"}
+case "$suffix" in
+    '') ;;
+    -|-0*|-*[!0-9]*) continue ;;
+    -*) ;;
+    *) continue ;;
+esac
+printf 'Verifying %s\n' "${extension_compressed##*/}"
 # Published compressed, so expand it here: everything below reads a partition
 # table, and this also proves the artifact a node will fetch decompresses.
     extension_artifact="$verify_home/${extension_name}.sysext.raw"
@@ -252,6 +267,16 @@ fi
     fi
 if ! sudo systemd-dissect "$extension_artifact" | grep -q 'signed'; then
     printf '%s is not verity signed.\n' "$extension_name" >&2
+    exit 1
+fi
+# The agent refuses an image for another base, and it takes the newest
+# revision, so one packaged for the wrong base blocks the extension outright.
+declared_base=$(sudo systemd-dissect --json=short "$extension_artifact" | jq -r \
+    '[.sysextRelease[]? | select(startswith("VERSION_ID="))][0] // ""
+     | ltrimstr("VERSION_ID=") | ltrimstr("\"") | rtrimstr("\"")')
+if [ "$declared_base" != "$version" ]; then
+    printf '%s declares base %s, not %s.\n' \
+        "${extension_compressed##*/}" "${declared_base:-none}" "$version" >&2
     exit 1
 fi
 signature_start=$("$sfdisk" --json "$extension_artifact" | jq -r \
@@ -288,6 +313,7 @@ if [ "$embedded_fingerprint" != "$expected_fingerprint" ] || \
     printf '%s signer does not match packaged trust.\n' "$extension_name" >&2
     exit 1
 fi
+done
 done
 if ! sbverify --cert "$secureboot_cert" "$uki_artifact" \
     >/dev/null; then

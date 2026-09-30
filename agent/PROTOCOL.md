@@ -174,9 +174,14 @@ reach it:
  "digest": "sha256:...", "base": "0.1.59"}
 ```
 
-`version` may be given in the acquired form to pin one; absent means whatever
-the source offers. `digest` is required with `path` and optional otherwise.
-`base` is optional; absent means the running base.
+`version` may be given in the acquired form to pin a feed version such as
+`0.1.59` or `0.1.59-2`. Absent means the newest image for `base`: a base's first
+image is published as `<base>` and never replaced, and rebuilds for the same
+base as `<base>-<n>`, so the agent lists the component's versions and takes the
+highest `n`, with the unrevisioned one counting as 0. A revision is the same
+base, so the image must still declare `base` itself. `digest` is required with
+`path` and optional otherwise. `base` is optional; absent means the running
+base.
 
 Either way the agent verifies the digest when one is known, validates verity
 and signature under the same image policy `systemd-sysext` will use, checks the
@@ -271,7 +276,7 @@ An acquirable extension is a `systemd-sysupdate` component:
 [Source]
 Type=url-file
 Path=https://updates.aide.gg/carbideos/fleet
-MatchPattern=chrome_@v.sysext.raw
+MatchPattern=chrome_@v.sysext.raw.zst
 
 [Target]
 Type=regular-file

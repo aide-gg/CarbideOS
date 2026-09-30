@@ -4,13 +4,25 @@ set -eu
 
 cd "$(dirname "$0")/.."
 variant=development
-case "${1-}" in
-    '') ;;
-    --fleet) variant=fleet ;;
-    --playground) variant=playground ;;
-    *) printf 'Usage: %s [--fleet|--playground]\n' "$0" >&2; exit 2 ;;
-esac
+extensions_only=
+for argument in "$@"; do
+    case "$argument" in
+        --fleet) variant=fleet ;;
+        --playground) variant=playground ;;
+        # Republish extensions for an already packaged base without touching
+        # its artifacts, release bundle or retention.
+        --extensions-only) extensions_only=1 ;;
+        *)
+            printf 'Usage: %s [--fleet|--playground] [--extensions-only]\n' "$0" >&2
+            exit 2
+            ;;
+    esac
+done
 version=$(tr -d '[:space:]' <mkosi.version)
+if [ -n "$extensions_only" ]; then
+    # The extension builds honour this override, so follow them.
+    version=${CARBIDEOS_EXTENSION_VERSION:-$version}
+fi
 if [ "$variant" = fleet ]; then
     output=carbideos-fleet
     release="dist/fleet/carbideos-${version}"
@@ -48,52 +60,65 @@ else
     update_prefix=carbideos
 fi
 
-if [ ! -d mkosi.output ]; then
-    printf '%s\n' 'No mkosi output found; run make build first.' >&2
+partial=
+raw=
+verity_sig_raw=
+trap 'rm -f "$partial" "$raw" "$verity_sig_raw"' EXIT HUP INT TERM
+
+if [ -z "$extensions_only" ]; then
+    if [ ! -d mkosi.output ]; then
+        printf '%s\n' 'No mkosi output found; run make build first.' >&2
+        exit 1
+    fi
+
+    retention=${CARBIDEOS_FEED_RETENTION:-4}
+    case "$retention" in
+        ''|*[!0-9]*)
+            printf 'Invalid CARBIDEOS_FEED_RETENTION: %s\n' "$retention" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$retention" -lt 1 ]; then
+        printf '%s\n' 'CARBIDEOS_FEED_RETENTION must be at least 1.' >&2
+        exit 2
+    fi
+
+    rm -rf "$release"
+    mkdir -p "$release"
+
+    # Release bundles are around 600MB each and nothing reads an old one once
+    # it has been published, but only the current version's directory was ever
+    # removed, so they accumulated indefinitely. That is how a build first
+    # failed: the host had filled its root filesystem with twenty-eight of them.
+    release_retention=${CARBIDEOS_RELEASE_RETENTION:-2}
+    case "$release_retention" in
+        ''|*[!0-9]*)
+            printf 'Invalid CARBIDEOS_RELEASE_RETENTION: %s\n' "$release_retention" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$release_retention" -lt 1 ]; then
+        printf '%s\n' 'CARBIDEOS_RELEASE_RETENTION must be at least 1.' >&2
+        exit 2
+    fi
+    release_parent=$(dirname "$release")
+    find "$release_parent" -maxdepth 1 -type d -name 'carbideos-*' -printf '%P\n' \
+        | sed 's/^carbideos-//' \
+        | grep -vx "$version" \
+        | LC_ALL=C sort -V -r \
+        | tail -n +"$release_retention" \
+        | while IFS= read -r stale; do
+            [ -n "$stale" ] || continue
+            printf 'Retiring release bundle %s\n' "$stale"
+            rm -rf "${release_parent:?}/carbideos-${stale:?}"
+        done
+elif [ ! -e "$update_feed/${update_prefix}_${version}.efi" ]; then
+    # Retention enumerates bases by their UKI, so an extension for a base the
+    # feed does not carry would never be retired.
+    printf 'CarbideOS %s is not in %s; package the base first.\n' \
+        "$version" "$update_feed" >&2
     exit 1
 fi
-
-retention=${CARBIDEOS_FEED_RETENTION:-4}
-case "$retention" in
-    ''|*[!0-9]*)
-        printf 'Invalid CARBIDEOS_FEED_RETENTION: %s\n' "$retention" >&2
-        exit 2
-        ;;
-esac
-if [ "$retention" -lt 1 ]; then
-    printf '%s\n' 'CARBIDEOS_FEED_RETENTION must be at least 1.' >&2
-    exit 2
-fi
-
-rm -rf "$release"
-mkdir -p "$release"
-
-# Release bundles are around 600MB each and nothing reads an old one once it
-# has been published, but only the current version's directory was ever
-# removed, so they accumulated indefinitely. That is how a build first failed:
-# the host had filled its root filesystem with twenty-eight of them.
-release_retention=${CARBIDEOS_RELEASE_RETENTION:-2}
-case "$release_retention" in
-    ''|*[!0-9]*)
-        printf 'Invalid CARBIDEOS_RELEASE_RETENTION: %s\n' "$release_retention" >&2
-        exit 2
-        ;;
-esac
-if [ "$release_retention" -lt 1 ]; then
-    printf '%s\n' 'CARBIDEOS_RELEASE_RETENTION must be at least 1.' >&2
-    exit 2
-fi
-release_parent=$(dirname "$release")
-find "$release_parent" -maxdepth 1 -type d -name 'carbideos-*' -printf '%P\n' \
-    | sed 's/^carbideos-//' \
-    | grep -vx "$version" \
-    | LC_ALL=C sort -V -r \
-    | tail -n +"$release_retention" \
-    | while IFS= read -r stale; do
-        [ -n "$stale" ] || continue
-        printf 'Retiring release bundle %s\n' "$stale"
-        rm -rf "${release_parent:?}/carbideos-${stale:?}"
-    done
 
 mkdir -p "$update_feed"
 
@@ -101,55 +126,80 @@ mkdir -p "$update_feed"
 # which versions sysupdate can see. Keeping several lets an operator target a
 # specific version and roll the base OS back through the feed instead of
 # depending solely on the one slot the node happens to still hold.
-remove_feed_version() {
+remove_feed_base() {
     rm -f \
         "$update_feed/${update_prefix}_$1.efi" \
         "$update_feed/${update_prefix}_$1.verity-sig.raw.zst"
     rm -f "$update_feed/${update_prefix}_$1"_*.root.raw.zst
     rm -f "$update_feed/${update_prefix}_$1"_*.verity.raw.zst
+}
+
+# The <n> of <name>_<base>-<n>.sysext.raw.zst. Anything else after the dash
+# could be some other base's version, so it is never treated as a revision.
+revision_of() {
+    revision=${1##*/}
+    revision=${revision#"${2}_${3}-"}
+    revision=${revision%.sysext.raw.zst}
+    case "$revision" in
+        ''|0*|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$revision"
+}
+
+remove_feed_version() {
+    remove_feed_base "$1"
     for name in $feed_extensions; do
         # Both spellings: an older feed holds these uncompressed.
         rm -f "$update_feed/${name}_$1.sysext.raw" \
             "$update_feed/${name}_$1.sysext.raw.zst"
+        for revised in "$update_feed/${name}_$1-"*.sysext.raw.zst; do
+            if revision_of "$revised" "$name" "$1" >/dev/null; then
+                rm -f -- "$revised"
+            fi
+        done
     done
 }
 
 # Regenerated by scripts/sign once the retained set is final.
 rm -f "$update_feed/SHA256SUMS" "$update_feed/SHA256SUMS.gpg"
+rm -f "$update_feed"/.*.partial
 
-# Replace any earlier build of this exact version, then drop whatever falls
-# outside the retention window. Every version set contributes exactly one UKI,
-# so the UKI names enumerate the versions present.
-remove_feed_version "$version"
-find "$update_feed" -maxdepth 1 -type f \
-    -name "${update_prefix}_*.efi" -printf '%P\n' \
-    | sed -e "s|^${update_prefix}_||" -e 's|\.efi$||' \
-    | LC_ALL=C sort -V -r \
-    | tail -n +"$retention" \
-    | while IFS= read -r stale; do
-        [ -n "$stale" ] || continue
-        printf 'Retiring update feed version %s\n' "$stale"
-        remove_feed_version "$stale"
+if [ -z "$extensions_only" ]; then
+    # Replace any earlier build of this exact version's base, then drop
+    # whatever falls outside the retention window. Its extensions are kept and
+    # revisioned below instead. Every version set contributes exactly one UKI,
+    # so the UKI names enumerate the versions present.
+    remove_feed_base "$version"
+    find "$update_feed" -maxdepth 1 -type f \
+        -name "${update_prefix}_*.efi" -printf '%P\n' \
+        | sed -e "s|^${update_prefix}_||" -e 's|\.efi$||' \
+        | LC_ALL=C sort -V -r \
+        | tail -n +"$retention" \
+        | while IFS= read -r stale; do
+            [ -n "$stale" ] || continue
+            printf 'Retiring update feed version %s\n' "$stale"
+            remove_feed_version "$stale"
+        done
+
+    for artifact in \
+        "mkosi.output/$output.raw.zst" \
+        "mkosi.output/$output.efi" \
+        "mkosi.output/$output.esp.raw.zst" \
+        "mkosi.output/$output.root-x86-64.raw.zst" \
+        "mkosi.output/$output.root-x86-64-verity.raw.zst" \
+        "mkosi.output/$output.root-x86-64-verity-sig.raw.zst" \
+        "mkosi.output/$output.manifest"; do
+        if [ ! -s "$artifact" ]; then
+            printf 'Missing required artifact: %s\n' "$artifact" >&2
+            exit 1
+        fi
+        cp --preserve=mode,timestamps "$artifact" "$release/"
     done
-
-for artifact in \
-    "mkosi.output/$output.raw.zst" \
-    "mkosi.output/$output.efi" \
-    "mkosi.output/$output.esp.raw.zst" \
-    "mkosi.output/$output.root-x86-64.raw.zst" \
-    "mkosi.output/$output.root-x86-64-verity.raw.zst" \
-    "mkosi.output/$output.root-x86-64-verity-sig.raw.zst" \
-    "mkosi.output/$output.manifest"; do
-    if [ ! -s "$artifact" ]; then
-        printf 'Missing required artifact: %s\n' "$artifact" >&2
-        exit 1
-    fi
-    cp --preserve=mode,timestamps "$artifact" "$release/"
-done
-cp "$release_pub" "$release/release-signing.pub.asc"
-cp "$secureboot_cert" "$release/secure-boot.crt"
-cp "$verity_cert" "$release/verity.crt"
-cp "$sysext_cert" "$release/sysext.crt"
+    cp "$release_pub" "$release/release-signing.pub.asc"
+    cp "$secureboot_cert" "$release/secure-boot.crt"
+    cp "$verity_cert" "$release/verity.crt"
+    cp "$sysext_cert" "$release/sysext.crt"
+fi
 
 # A feed that once carried an extension would otherwise serve it forever.
 # Both spellings, so an uncompressed image from an older feed is cleared too.
@@ -168,6 +218,77 @@ for stale in "$update_feed"/*.sysext.raw "$update_feed"/*.sysext.raw.zst; do
     }
 done
 
+# Decompressed, so the comparison does not depend on zstd reproducing its own
+# output byte for byte.
+feed_digest() {
+    zstd -dqc -- "$1" | sha256sum | cut -d ' ' -f 1
+}
+
+# Published compressed. These are the largest thing in the feed, they are
+# mostly a filesystem image rather than incompressible payload, and sysupdate
+# decompresses a source by its suffix exactly as it already does for the base
+# image beside it.
+#
+# zstd rather than xz: a little larger, decompresses several times faster on
+# the node, and is the format already proven in this feed.
+#
+# Written under a hidden name first. A truncated image left at the final name
+# would read as a different published image and be revisioned around forever.
+compress_extension() {
+    partial="$update_feed/.${2##*/}.partial"
+    zstd -19 -T0 -q --no-progress -f -o "$partial" "$1"
+    mv -f -- "$partial" "$2"
+    partial=
+}
+
+# Feed payloads are immutable, so a changed image for a base that already has
+# one is published beside it as <name>_<base>-<n>. The unrevisioned image is
+# never touched: agents sealed into older bases ask for exactly that name.
+publish_extension() {
+    name=$1
+    image=$2
+    first="$update_feed/${name}_${version}.sysext.raw.zst"
+    rm -f "$update_feed/${name}_${version}.sysext.raw"
+    if [ ! -e "$first" ]; then
+        printf 'Publishing %s for CarbideOS %s\n' "$name" "$version"
+        compress_extension "$image" "$first"
+        return 0
+    fi
+    digest=$(sha256sum <"$image" | cut -d ' ' -f 1)
+    if [ "$(feed_digest "$first")" = "$digest" ]; then
+        printf '%s for CarbideOS %s is already published\n' "$name" "$version"
+        return 0
+    fi
+
+    newest=0
+    for existing in "$update_feed/${name}_${version}-"*.sysext.raw.zst; do
+        revision=$(revision_of "$existing" "$name" "$version") || continue
+        if [ "$revision" -gt "$newest" ]; then
+            newest=$revision
+        fi
+    done
+    if [ "$newest" -gt 0 ] && [ "$(feed_digest \
+            "$update_feed/${name}_${version}-${newest}.sysext.raw.zst")" = "$digest" ]; then
+        printf '%s for CarbideOS %s is already published as revision %s\n' \
+            "$name" "$version" "$newest"
+    else
+        newest=$((newest + 1))
+        printf 'Publishing %s for CarbideOS %s as revision %s\n' \
+            "$name" "$version" "$newest"
+        compress_extension "$image" \
+            "$update_feed/${name}_${version}-${newest}.sysext.raw.zst"
+    fi
+
+    # Nodes only take the newest revision, and the bucket is capped.
+    for existing in "$update_feed/${name}_${version}-"*.sysext.raw.zst; do
+        revision=$(revision_of "$existing" "$name" "$version") || continue
+        if [ "$revision" != "$newest" ]; then
+            printf 'Retiring superseded %s\n' "${existing##*/}"
+            rm -f -- "$existing"
+        fi
+    done
+}
+
 # Named <extension>_<base version>: an extension only merges into the base it
 # was built against, and a node has to be able to construct this name from what
 # it knows. Its own version lives in SYSEXT_VERSION_ID inside the image.
@@ -177,22 +298,17 @@ for name in $feed_extensions; do
         printf 'Missing %s system extension; run make extensions.\n' "$name" >&2
         exit 1
     fi
-    # Published compressed. These are the largest thing in the feed, they are
-    # mostly a filesystem image rather than incompressible payload, and
-    # sysupdate decompresses a source by its suffix exactly as it already does
-    # for the base image beside it.
-    #
-    # zstd rather than xz: a little larger, decompresses several times faster
-    # on the node, and is the format already proven in this feed.
-    rm -f "$update_feed/${name}_${version}.sysext.raw" \
-        "$update_feed/${name}_${version}.sysext.raw.zst"
-    zstd -19 -T0 -q --no-progress -o \
-        "$update_feed/${name}_${version}.sysext.raw.zst" "$image"
+    publish_extension "$name" "$image"
 done
+
+if [ -n "$extensions_only" ]; then
+    printf 'Prepared CarbideOS %s extension artifacts in %s\n' \
+        "$version" "$update_feed"
+    exit 0
+fi
 
 raw=$(mktemp --suffix=.raw)
 verity_sig_raw=$(mktemp --suffix=.verity-sig.raw)
-trap 'rm -f "$raw" "$verity_sig_raw"' EXIT HUP INT TERM
 zstd --long=31 --decompress --stdout "mkosi.output/$output.raw.zst" >"$raw"
 sfdisk=${SFDISK:-$(command -v sfdisk || true)}
 [ -n "$sfdisk" ] || sfdisk=/usr/sbin/sfdisk

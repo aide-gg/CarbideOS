@@ -10,8 +10,10 @@
 # node could not update itself at all until someone noticed and intervened.
 #
 # The version here is the *base* version the image is built for, which is how
-# these images are named in the feed (chrome_0.1.58.sysext.raw). Asking for a
-# version therefore means asking for the Chrome built against that base.
+# these images are named in the feed (chrome_0.1.58.sysext.raw.zst). Asking for
+# a version therefore means asking for the Chrome built against that base. A
+# rebuild for an already published base is chrome_0.1.58-1 and so on, and the
+# agent asks for the highest revision for its base.
 [Transfer]
 Verify=yes
 

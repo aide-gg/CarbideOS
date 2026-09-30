@@ -7,8 +7,6 @@ set -eu
 
 action=$1
 name=$2
-# shellcheck disable=SC1091
-. /usr/lib/os-release
 case "$name" in
     chrome|rat-game-16) ;;
     *)
@@ -18,21 +16,13 @@ case "$name" in
 esac
 # Watchtower is deliberately absent: it is not published to the feed and
 # arrives only through carbideos-ops install-extension.
-# Published compressed; systemd-pull decompresses a raw image by its suffix.
-artifact="${name}_${VERSION_ID}.sysext.raw.zst"
 
 case "$action" in
     install)
-        install -d -m 0700 /run/carbide/staging
-        temporary=$(mktemp "/run/carbide/staging/${name}.XXXXXX.raw")
-        trap 'rm -f "$temporary"' EXIT HUP INT TERM
-        /usr/lib/systemd/systemd-pull raw --direct --verify=no \
-            --class=sysext --size-max=1G \
-            "https://updates.aide.gg/carbideos/$artifact" "$temporary"
-        chmod 0644 "$temporary"
-        digest=$(sha256sum "$temporary" | awk '{print $1}')
-        /usr/bin/carbide-agent stage-extension "$name" --base "$VERSION_ID" \
-            --path "$temporary" --digest "$digest" --activate
+        # The agent fetches through the extension's sealed sysupdate component,
+        # which verifies the signed feed manifest and picks the newest revision
+        # for the running base.
+        /usr/bin/carbide-agent stage-extension "$name" --activate
         ;;
     remove)
         /usr/bin/carbide-agent remove "$name"
