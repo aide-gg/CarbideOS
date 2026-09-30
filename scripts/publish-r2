@@ -289,6 +289,20 @@ unchanged_payload() {
     [ -n "$remote_hash" ] && [ "$local_hash" = "$remote_hash" ]
 }
 
+new_base_versions=
+while IFS="$tab" read -r relative _size; do
+    case "$relative" in
+        "${artifact_prefix}_"*.efi)
+            if [ "$remote_manifest_valid" -eq 0 ] || \
+               [ -z "$(manifest_hash "$relative" "$remote_sums")" ]; then
+                version=${relative#"${artifact_prefix}_"}
+                version=${version%.efi}
+                new_base_versions="${new_base_versions}${new_base_versions:+ }$version"
+            fi
+            ;;
+    esac
+done <"$normal_files"
+
 while IFS="$tab" read -r relative size; do
     if unchanged_payload "$relative" "$size"; then
         printf 'Skipping unchanged %s/%s\n' "$prefix" "$relative"
@@ -331,16 +345,18 @@ fi
 printf 'Published %s to r2://%s/%s (%s/%s bytes used).\n' \
     "$source" "$CARBIDEOS_R2_BUCKET" "$prefix" "$final" "$limit"
 
-# A base with no Watchtower image is one no node can boot into, and that build
-# reads its base list from this feed, so it has to be asked after the upload
-# rather than before. Not fatal: the feed is published either way and the build
-# can be started by hand.
-if [ "$prefix" = carbideos/fleet ]; then
+# A newly published base with no Watchtower image is one no node can boot into.
+# Chrome-only and manifest-only republishes need no new sysext, so compare base
+# versions against the previously signed manifest rather than dispatching after
+# every upload.
+if [ "$prefix" = carbideos/fleet ] && [ -n "$new_base_versions" ]; then
     if ! command -v gh >/dev/null 2>&1; then
         printf '%s\n' 'gh is not installed; start the Watchtower sysext build by hand.' >&2
     elif gh workflow run carbideos-sysext.yml \
-            --repo "${CARBIDEOS_WATCHTOWER_REPO:-aide-gg/watchtower}" >/dev/null 2>&1; then
-        printf '%s\n' 'Asked Watchtower to build sysexts for the published bases.'
+            --repo "${CARBIDEOS_WATCHTOWER_REPO:-aide-gg/watchtower}" \
+            -f "carbideos_versions=$new_base_versions" >/dev/null 2>&1; then
+        printf 'Asked Watchtower to build sysexts for CarbideOS %s.\n' \
+            "$new_base_versions"
     else
         printf '%s\n' 'Could not start the Watchtower sysext build; start it by hand.' >&2
     fi

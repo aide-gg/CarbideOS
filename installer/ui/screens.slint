@@ -1,0 +1,1131 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { Theme } from "theme.slint";
+import { Chamfer, Mark, Wordmark, Brand, Tag, Caption, KeyHint, Note, Divider, Meter, StatRow } from "components.slint";
+import { DiskInfo } from "types.slint";
+
+// Every first-screen variant doubles as the boot screen: the mark fades in at
+// screen centre on `mark-in`, rests, and the layout opens out of it on `shown`.
+
+// A: laid out like the summary screen, with the mark gliding into the headline.
+export component AttractEditorial inherits Rectangle {
+    in property <string> version;
+    in property <string> edition;
+    in property <string> status;
+    in property <string> image-status;
+    in property <bool> mark-in: true;
+    in property <bool> shown: true;
+
+    VerticalLayout {
+        padding-left: 96px;
+        padding-right: 96px;
+        alignment: center;
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: 22px;
+
+            slot := Rectangle {
+                width: 40px;
+                height: 44px;
+            }
+
+            Rectangle {
+                width: title.preferred-width;
+                height: 44px;
+                title := Text {
+                    height: 100%;
+                    text: root.edition == "" ? "Install CarbideOS" : "Install CarbideOS " + root.edition;
+                    font-family: Theme.face;
+                    font-size: 34px;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                    opacity: root.shown ? 1 : 0;
+                    x: root.shown ? 0 : -12px;
+                    animate opacity { duration: Theme.slow; delay: 420ms; easing: Theme.ease-out; }
+                    animate x { duration: Theme.slow; delay: 420ms; easing: Theme.ease-out; }
+                }
+            }
+        }
+
+        Rectangle { height: 36px; }
+
+        Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 500ms; } }
+        Rectangle {
+            height: 34px;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 540ms; }
+            StatRow { width: 100%; height: 100%; key: "VERSION"; value: root.version; }
+        }
+        Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 580ms; } }
+        Rectangle {
+            height: 34px;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 620ms; }
+            StatRow { width: 100%; height: 100%; key: "STORAGE"; value: root.status; }
+        }
+        Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 660ms; } }
+        Rectangle {
+            height: 34px;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 700ms; }
+            StatRow { width: 100%; height: 100%; key: "IMAGE"; value: root.image-status; }
+        }
+        Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 740ms; } }
+
+        Rectangle { height: 44px; }
+
+        HorizontalLayout {
+            alignment: space-between;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 820ms; }
+
+            Note { text: "NOTHING IS WRITTEN UNTIL YOU CONFIRM"; }
+            KeyHint { key: "ENTER"; label: "CONTINUE"; }
+        }
+    }
+
+    Mark {
+        width: root.shown ? 40px : 104px;
+        height: self.width;
+        x: root.shown ? slot.absolute-position.x - root.absolute-position.x : (root.width - self.width) / 2;
+        y: root.shown ? slot.absolute-position.y - root.absolute-position.y + 2px : (root.height - self.height) / 2;
+        opacity: root.mark-in ? 1 : 0;
+        animate width, x, y { duration: 700ms; easing: Theme.ease-in-out; }
+        animate opacity { duration: Theme.boot-fade; easing: Theme.ease-out; }
+    }
+}
+
+// B: the boot mark stays put and one status line joins it.
+export component AttractMinimal inherits Rectangle {
+    in property <string> version;
+    in property <string> edition;
+    in property <string> status;
+    in property <string> image-status;
+    in property <bool> mark-in: true;
+    in property <bool> shown: true;
+
+    mark := Mark {
+        width: 104px;
+        height: 104px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        opacity: root.mark-in ? 1 : 0;
+        animate opacity { duration: Theme.boot-fade; easing: Theme.ease-out; }
+    }
+
+    Text {
+        width: root.width;
+        y: mark.y + mark.height + 48px;
+        text: root.edition == "" ? "CarbideOS  " + root.version : "CarbideOS " + root.edition + "  " + root.version;
+        font-family: Theme.face;
+        font-size: 22px;
+        color: Theme.text;
+        horizontal-alignment: center;
+        opacity: root.shown ? 1 : 0;
+        animate opacity { duration: Theme.slow; delay: 120ms; }
+    }
+
+    Text {
+        width: root.width;
+        y: mark.y + mark.height + 92px;
+        text: root.status;
+        font-family: Theme.face;
+        font-size: 15px;
+        letter-spacing: 1px;
+        color: Theme.text-dim;
+        horizontal-alignment: center;
+        opacity: root.shown ? 1 : 0;
+        animate opacity { duration: Theme.slow; delay: 200ms; }
+    }
+
+    HorizontalLayout {
+        x: 64px;
+        y: root.height - 64px - self.height;
+        width: root.width - 128px;
+        height: 20px;
+        alignment: space-between;
+        opacity: root.shown ? 1 : 0;
+        animate opacity { duration: Theme.slow; delay: 360ms; }
+
+        Note {
+            width: 420px;
+            text: "INSTALLER";
+        }
+
+        HorizontalLayout {
+            alignment: center;
+            KeyHint { key: "ENTER"; label: "CONTINUE"; }
+        }
+
+        Note {
+            width: 420px;
+            text: root.image-status;
+            horizontal-alignment: right;
+        }
+    }
+}
+
+// C: the boot mark grows into a dim backdrop bleeding off the right edge, with
+// the wordmark and status set on the left.
+export component AttractBackdrop inherits Rectangle {
+    in property <string> version;
+    in property <string> edition;
+    in property <string> status;
+    in property <string> image-status;
+    in property <bool> mark-in: true;
+    in property <bool> shown: true;
+
+    property <length> size: root.height * 1.25;
+
+    Mark {
+        width: root.shown ? root.size : 104px;
+        height: self.width;
+        x: root.shown ? root.width - root.size * 0.62 : (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        tint: root.shown ? #141414 : Theme.text;
+        opacity: root.mark-in ? 1 : 0;
+        animate width, x { duration: 900ms; easing: Theme.ease-in-out; }
+        animate tint { duration: 900ms; easing: Theme.ease-in-out; }
+        animate opacity { duration: Theme.boot-fade; easing: Theme.ease-out; }
+    }
+
+    VerticalLayout {
+        x: 96px;
+        width: 720px;
+        alignment: center;
+        spacing: 0;
+
+        Text {
+            text: "INSTALLER  ·  " + root.version;
+            font-family: Theme.face;
+            font-size: 13px;
+            letter-spacing: 4px;
+            color: Theme.text-faint;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.slow; delay: 600ms; }
+        }
+
+        Rectangle { height: 24px; }
+
+        Rectangle {
+            height: 56px;
+            wordmark := Wordmark {
+                x: root.shown ? 0 : -16px;
+                y: 0;
+                opacity: root.shown ? 1 : 0;
+                animate opacity { duration: Theme.slow; delay: 680ms; easing: Theme.ease-out; }
+                animate x { duration: Theme.slow; delay: 680ms; easing: Theme.ease-out; }
+            }
+
+            if root.edition != "": Tag {
+                text: root.edition.to-uppercase();
+                x: wordmark.x + wordmark.width + 28px;
+                y: parent.height - self.height;
+                opacity: root.shown ? 1 : 0;
+                animate opacity { duration: Theme.slow; delay: 760ms; easing: Theme.ease-out; }
+            }
+        }
+
+        Rectangle { height: 40px; }
+
+        Text {
+            text: root.status;
+            font-family: Theme.face;
+            font-size: 15px;
+            color: Theme.text-dim;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.slow; delay: 780ms; }
+        }
+
+        Rectangle { height: 10px; }
+
+        Note {
+            text: root.image-status;
+            color: Theme.text-faint;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.slow; delay: 840ms; }
+        }
+
+        Rectangle { height: 56px; }
+
+        HorizontalLayout {
+            alignment: start;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.slow; delay: 920ms; }
+            KeyHint { key: "ENTER"; label: "CONTINUE"; }
+        }
+    }
+}
+
+component DiskCard inherits Rectangle {
+    in property <DiskInfo> disk;
+    in property <bool> selected;
+    in property <int> index;
+    in property <bool> shown;
+    callback picked();
+
+    height: 92px;
+    // An ineligible device still has to be legible: the operator needs to see
+    // that their USB stick was recognised and deliberately refused, not
+    // silently dropped from the list.
+    opacity: root.shown ? (root.disk.eligible ? 1 : 0.66) : 0;
+    x: root.shown ? 0 : -24px;
+    animate opacity { duration: Theme.normal; delay: root.index * 70ms; easing: Theme.ease-out; }
+    animate x { duration: Theme.normal; delay: root.index * 70ms; easing: Theme.ease-out; }
+
+    Chamfer {
+        width: 100%;
+        height: 100%;
+        fill-color: root.selected ? Theme.surface-raised : Theme.surface;
+        stroke-color: root.selected ? Theme.line-active : Theme.line;
+        line-width: 1px;
+    }
+
+    // Selection tick on the leading edge. Height animates instead of scale,
+    // which the software renderer cannot do.
+    Rectangle {
+        x: 0;
+        width: 2px;
+        height: root.selected ? 44px : 0px;
+        y: (parent.height - self.height) / 2;
+        background: Theme.text;
+        animate height { duration: Theme.quick; easing: Theme.ease-out; }
+    }
+
+    // The selected card's contents step forward to meet the tick.
+    HorizontalLayout {
+        x: root.selected ? 10px : 0px;
+        width: root.width - 10px;
+        padding-left: 28px;
+        padding-right: 28px;
+        spacing: 24px;
+        animate x { duration: Theme.normal; easing: ease-out-back; }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 6px;
+
+            Text {
+                text: root.disk.model;
+                font-family: Theme.face;
+                font-size: 17px;
+                color: Theme.text;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.disk.node + "   " + root.disk.bus + "   " + root.disk.kind
+                    + (root.disk.serial == "" ? "" : "   " + root.disk.serial);
+                font-family: Theme.face;
+                font-size: 11px;
+                letter-spacing: 1px;
+                color: Theme.text-faint;
+                overflow: elide;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+
+            Text {
+                text: root.disk.size;
+                font-family: Theme.face;
+                font-size: 20px;
+                color: root.selected ? Theme.text : Theme.text-dim;
+                horizontal-alignment: right;
+                animate color { duration: Theme.quick; }
+            }
+
+            Text {
+                text: root.disk.note;
+                font-family: Theme.face;
+                font-size: 10px;
+                letter-spacing: 1px;
+                color: root.disk.eligible ? Theme.text-faint : Theme.danger;
+                horizontal-alignment: right;
+            }
+        }
+    }
+
+    TouchArea {
+        clicked => { root.picked(); }
+    }
+}
+
+export component TargetPick inherits Rectangle {
+    in property <[DiskInfo]> disks;
+    in property <int> selected;
+    in property <string> image-status;
+    in property <bool> shown;
+    callback pick(int);
+    callback rescan();
+
+    VerticalLayout {
+        padding: 64px;
+        spacing: 0;
+
+        Rectangle {
+            height: 46px;
+
+            HorizontalLayout {
+                alignment: space-between;
+
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 10px;
+
+                    Caption {
+                        text: "SELECT INSTALLATION TARGET";
+                        opacity: root.shown ? 1 : 0;
+                        animate opacity { duration: Theme.normal; }
+                    }
+
+                    Text {
+                        text: "The selected device will be erased completely.";
+                        font-family: Theme.face;
+                        font-size: 13px;
+                        color: Theme.text-dim;
+                        opacity: root.shown ? 1 : 0;
+                        animate opacity { duration: Theme.normal; delay: 60ms; }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Brand {
+                        opacity: root.shown ? 1 : 0;
+                        animate opacity { duration: Theme.slow; delay: 120ms; }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 28px; }
+        Divider { opacity: root.shown ? 1 : 0; }
+        Rectangle { height: 20px; }
+
+        Flickable {
+            content-height: list.preferred-height;
+
+            list := VerticalLayout {
+                spacing: 10px;
+                alignment: start;
+
+                for disk[idx] in root.disks: DiskCard {
+                    disk: disk;
+                    index: idx;
+                    shown: root.shown;
+                    selected: idx == root.selected;
+                    picked => { root.pick(idx); }
+                }
+            }
+        }
+
+        Rectangle { height: 20px; }
+
+        // Equal-width outer cells, so the middle cell is symmetric about the
+        // screen and its centred text lands on the true centre. Overlaying it
+        // instead would centre it correctly but leave it a pixel off the
+        // baseline of the hints beside it, since it would no longer be
+        // positioned by the same layout.
+        HorizontalLayout {
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 200ms; }
+
+            HorizontalLayout {
+                width: 520px;
+                alignment: start;
+                spacing: 40px;
+                KeyHint { key: "↑ ↓"; label: "SELECT"; }
+                KeyHint { key: "ENTER"; label: "CONTINUE"; }
+                KeyHint { key: "S"; label: "RESCAN"; }
+            }
+
+            Note {
+                text: root.image-status;
+                horizontal-stretch: 1;
+                horizontal-alignment: center;
+            }
+
+            // Held for the power keys the window pins bottom right.
+            Rectangle { width: 520px; }
+        }
+    }
+}
+
+// Hold to confirm. The fill accelerates as it charges, drains on release, and
+// floods solid once the hold completes.
+component HoldBar inherits Rectangle {
+    in property <float> hold;
+    in property <bool> holding;
+    in property <bool> committed;
+    callback hold-start();
+    callback hold-end();
+
+    width: 560px;
+    height: 64px;
+
+    Chamfer {
+        width: 100%;
+        height: 100%;
+        fill-color: Theme.surface;
+    }
+
+    // Grown as its own chamfer rather than revealed through a clip, which
+    // keeps the leading edge raked at the same angle as every other edge.
+    Chamfer {
+        x: 0;
+        width: root.committed ? root.width : root.width * clamp(root.hold, 0, 1);
+        height: root.height;
+        fill-color: root.committed ? Theme.danger : #45160f;
+        animate fill-color { duration: Theme.quick; }
+    }
+
+    // Bright leading edge while charging.
+    Rectangle {
+        x: max(0px, root.width * clamp(root.hold, 0, 1) - self.width);
+        y: 14px;
+        width: 3px;
+        height: root.height - 28px;
+        background: Theme.danger;
+        opacity: root.holding && root.hold > 0.04 ? 1 : 0;
+        animate opacity { duration: Theme.quick; }
+    }
+
+    Chamfer {
+        width: 100%;
+        height: 100%;
+        stroke-color: root.holding || root.committed ? Theme.danger : Theme.line;
+        line-width: 1px;
+        animate stroke-color { duration: Theme.quick; }
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.committed ? "ERASING" : root.holding ? "KEEP HOLDING" : "HOLD ENTER TO ERASE AND INSTALL";
+        font-family: Theme.face;
+        font-size: 13px;
+        letter-spacing: 3px;
+        color: root.holding || root.committed ? Theme.text : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.hold-start();
+            } else if (event.kind == PointerEventKind.up
+                    || event.kind == PointerEventKind.cancel) {
+                root.hold-end();
+            }
+        }
+    }
+}
+
+// Type the end of the drive's serial. The code is printed on the drive, so
+// typing it proves the operator is looking at the disk about to be erased.
+component CodeEntry inherits Rectangle {
+    in property <DiskInfo> disk;
+    in property <int> typed;
+    in property <bool> committed;
+    in property <bool> shown;
+
+    VerticalLayout {
+        alignment: start;
+        spacing: 18px;
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 14px;
+
+            Caption {
+                text: "TYPE THE LAST " + root.disk.code-chars.length + " OF THE " + root.disk.code-kind;
+                vertical-alignment: center;
+            }
+
+            HorizontalLayout {
+                Text {
+                    text: root.disk.code-context;
+                    font-family: Theme.face;
+                    font-size: 15px;
+                    letter-spacing: 1px;
+                    color: Theme.text-faint;
+                    vertical-alignment: center;
+                }
+                for c[i] in root.disk.code-chars: Text {
+                    text: c;
+                    font-family: Theme.face;
+                    font-size: 15px;
+                    letter-spacing: 1px;
+                    color: i < root.typed ? Theme.text : Theme.danger;
+                    vertical-alignment: center;
+                    animate color { duration: Theme.quick; }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 12px;
+
+            for c[i] in root.disk.code-chars: Rectangle {
+                width: 64px;
+                height: 76px;
+                property <bool> filled: i < root.typed;
+                property <bool> next: i == root.typed && !root.committed;
+
+                Chamfer {
+                    width: 100%;
+                    height: 100%;
+                    cut: 10px;
+                    fill-color: root.committed ? Theme.danger : parent.filled ? Theme.surface-raised : Theme.surface;
+                    animate fill-color { duration: Theme.quick; delay: root.committed ? i * 60ms : 0ms; }
+                }
+
+                Chamfer {
+                    width: 100%;
+                    height: 100%;
+                    cut: 10px;
+                    stroke-color: root.committed ? Theme.danger
+                        : parent.filled ? Theme.text : parent.next ? Theme.line-active : Theme.line;
+                    line-width: 1px;
+                    animate stroke-color { duration: Theme.quick; }
+                }
+
+                // Each character drops into its slot and lands with a bounce.
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: c;
+                    font-family: Theme.face;
+                    font-size: 34px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    opacity: parent.filled || root.committed ? 1 : 0;
+                    y: parent.filled || root.committed ? 0 : -18px;
+                    animate opacity { duration: Theme.quick; }
+                    animate y { duration: Theme.normal; easing: ease-out-back; }
+                }
+
+                // Where the next character goes.
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - 18px;
+                    width: parent.next ? 22px : 0px;
+                    height: 2px;
+                    background: Theme.text;
+                    animate width { duration: Theme.normal; easing: ease-out-back; }
+                }
+            }
+        }
+    }
+}
+
+// Arm with Enter, then a countdown the operator can abort at any point. The
+// segments drain continuously and the numeral drops in on each second.
+component Countdown inherits Rectangle {
+    in property <bool> armed;
+    in property <int> count;
+    in property <float> arm;
+    in property <bool> committed;
+    in property <bool> ticked;
+
+    width: 560px;
+    height: 64px;
+
+    property <length> numeral-width: 96px;
+    property <length> gap: 8px;
+    property <length> segment-width: (root.width - root.numeral-width - 16px - (Theme.countdown - 1) * root.gap) / Theme.countdown;
+
+    Chamfer {
+        width: 100%;
+        height: 100%;
+        fill-color: root.committed ? Theme.danger : Theme.surface;
+        animate fill-color { duration: Theme.quick; }
+    }
+
+    Chamfer {
+        width: 100%;
+        height: 100%;
+        stroke-color: root.armed || root.committed ? Theme.danger : Theme.line;
+        line-width: 1px;
+        animate stroke-color { duration: Theme.quick; }
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.committed ? "ERASING" : "PRESS ENTER TO ARM THE ERASE";
+        font-family: Theme.face;
+        font-size: 13px;
+        letter-spacing: 3px;
+        color: root.committed ? Theme.text : Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        opacity: root.armed && !root.committed ? 0 : 1;
+        animate opacity { duration: Theme.quick; }
+    }
+
+    for i in Theme.countdown: Chamfer {
+        property <float> left: clamp(Theme.countdown * (1 - root.arm) - i, 0, 1);
+        x: 16px + i * (root.segment-width + root.gap);
+        y: root.armed && !root.committed ? 16px : 26px;
+        width: root.segment-width;
+        height: root.height - 32px;
+        cut: 6px;
+        fill-color: Theme.danger;
+        opacity: root.armed && !root.committed ? 0.14 + 0.86 * self.left : 0;
+        animate y { duration: Theme.normal; delay: i * 40ms; easing: ease-out-back; }
+    }
+
+    Rectangle {
+        x: root.width - root.numeral-width;
+        width: root.numeral-width;
+        height: root.height;
+        opacity: root.armed && !root.committed ? 1 : 0;
+        animate opacity { duration: Theme.quick; }
+
+        numeral := Text {
+            width: 100%;
+            height: 100%;
+            text: max(root.count, 1);
+            font-family: Theme.face;
+            font-size: 40px;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+
+            states [
+                ticked when root.ticked: {
+                    numeral.y: -14px;
+                    numeral.opacity: 0.2;
+                    in {
+                        animate numeral.y { duration: 0ms; }
+                        animate numeral.opacity { duration: 0ms; }
+                    }
+                    out {
+                        animate numeral.y { duration: 420ms; easing: ease-out-back; }
+                        animate numeral.opacity { duration: 200ms; }
+                    }
+                }
+            ]
+        }
+    }
+}
+
+export component Confirm inherits Rectangle {
+    in property <DiskInfo> disk;
+    in property <bool> shown;
+    // 0 hold, 1 type the code, 2 countdown. See AppWindow for the state.
+    in property <int> confirm-style;
+    in property <float> hold;
+    in property <bool> holding;
+    in property <bool> committed;
+    in property <int> typed;
+    in property <bool> armed;
+    in property <int> count;
+    in property <float> arm;
+    in property <int> miss;
+    callback hold-start();
+    callback hold-end();
+
+    // A rejected attempt knocks the control sideways and lets it ring back.
+    property <bool> kicked: false;
+    changed miss => {
+        root.kicked = true;
+    }
+    Timer {
+        interval: 32ms;
+        running: root.kicked;
+        triggered => { root.kicked = false; }
+    }
+
+    // The countdown numeral drops in on every tick.
+    property <bool> ticked: false;
+    changed count => {
+        root.ticked = true;
+    }
+    Timer {
+        interval: 32ms;
+        running: root.ticked;
+        triggered => { root.ticked = false; }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        padding-left: 64px;
+        padding-right: 64px;
+
+        HorizontalLayout {
+            alignment: center;
+            Caption {
+                text: "DESTRUCTIVE OPERATION";
+                color: Theme.danger;
+                opacity: root.shown ? 1 : 0;
+                animate opacity { duration: Theme.normal; }
+            }
+        }
+
+        Rectangle { height: 26px; }
+
+        Rectangle {
+            height: 46px;
+            Text {
+                width: 100%;
+                text: "Erase " + root.disk.model;
+                font-family: Theme.face;
+                font-size: 34px;
+                color: Theme.text;
+                horizontal-alignment: center;
+                opacity: root.shown ? 1 : 0;
+                y: root.shown ? 0 : 10px;
+                animate opacity { duration: Theme.normal; delay: 60ms; easing: Theme.ease-out; }
+                animate y { duration: Theme.normal; delay: 60ms; easing: Theme.ease-out; }
+            }
+        }
+
+        Rectangle { height: 12px; }
+
+        Text {
+            text: root.disk.node + "   ·   " + root.disk.size + "   ·   " + root.disk.bus;
+            font-family: Theme.face;
+            font-size: 13px;
+            letter-spacing: 2px;
+            color: Theme.text-dim;
+            horizontal-alignment: center;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 120ms; }
+        }
+
+        Rectangle { height: 48px; }
+
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 640px;
+                height: 132px;
+                opacity: root.shown ? 1 : 0;
+                y: root.shown ? 0 : 16px;
+                animate opacity { duration: Theme.normal; delay: 180ms; }
+                animate y { duration: Theme.slow; delay: 180ms; easing: Theme.ease-out; }
+
+                body := Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+
+                    states [
+                        kicked when root.kicked: {
+                            body.x: 18px;
+                            in { animate body.x { duration: 0ms; } }
+                            out { animate body.x { duration: 700ms; easing: ease-out-elastic; } }
+                        }
+                    ]
+
+                    if root.confirm-style == 0: HoldBar {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        hold: root.hold;
+                        holding: root.holding;
+                        committed: root.committed;
+                        hold-start => { root.hold-start(); }
+                        hold-end => { root.hold-end(); }
+                    }
+
+                    if root.confirm-style == 1: CodeEntry {
+                        width: parent.width;
+                        height: parent.height;
+                        disk: root.disk;
+                        typed: root.typed;
+                        committed: root.committed;
+                        shown: root.shown;
+                    }
+
+                    if root.confirm-style == 2: Countdown {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        armed: root.armed;
+                        count: root.count;
+                        arm: root.arm;
+                        committed: root.committed;
+                        ticked: root.ticked;
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 28px; }
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 40px;
+            opacity: root.shown && !root.committed ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: root.shown ? 240ms : 0ms; }
+            if root.confirm-style == 1: KeyHint { key: "BKSP"; label: "DELETE"; }
+            KeyHint {
+                key: "ESC";
+                label: root.confirm-style == 2 && root.armed ? "ABORT" : "BACK";
+            }
+        }
+    }
+}
+
+export component Progress inherits Rectangle {
+    in property <float> value;
+    in property <string> stage;
+    in property <string> detail;
+    in property <string> volume;
+    in property <string> target;
+    in property <bool> shown;
+
+    VerticalLayout {
+        padding: 64px;
+        alignment: center;
+
+        Rectangle {
+            height: 20px;
+
+            HorizontalLayout {
+                alignment: space-between;
+
+                Caption {
+                    text: "INSTALLING TO " + root.target;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Brand {
+                        opacity: root.shown ? 1 : 0;
+                        animate opacity { duration: Theme.slow; delay: 120ms; }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 32px; }
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+
+            Text {
+                text: Math.round(clamp(root.value, 0, 1) * 100);
+                font-family: Theme.face;
+                font-size: 104px;
+                color: Theme.text;
+                vertical-alignment: bottom;
+            }
+
+            Text {
+                text: "%";
+                font-family: Theme.face;
+                font-size: 36px;
+                color: Theme.text-faint;
+                vertical-alignment: bottom;
+                y: -14px;
+            }
+        }
+
+        Rectangle { height: 28px; }
+
+        Meter {
+            value: root.value;
+            active: root.shown;
+        }
+
+        Rectangle { height: 22px; }
+
+        HorizontalLayout {
+            alignment: space-between;
+
+            Text {
+                text: root.stage;
+                font-family: Theme.face;
+                font-size: 13px;
+                letter-spacing: 2px;
+                color: Theme.text;
+            }
+
+            Text {
+                text: root.detail;
+                font-family: Theme.face;
+                font-size: 13px;
+                color: Theme.text-dim;
+            }
+        }
+    }
+}
+
+export component Summary inherits Rectangle {
+    in property <bool> shown;
+    in property <string> headline;
+    in property <string> elapsed;
+    in property <string> written;
+    in property <string> average;
+    in property <string> peak;
+    in property <string> target;
+    in property <string> image;
+    in property <string> version;
+    in property <bool> failed;
+    in property <string> message;
+
+    VerticalLayout {
+        padding-left: 96px;
+        padding-right: 96px;
+        alignment: center;
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: 22px;
+
+            // The mark stamps down into place and sends out a single ping.
+            Rectangle {
+                width: 40px;
+                height: 44px;
+
+                Chamfer {
+                    width: root.shown ? 132px : 40px;
+                    height: self.width;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    cut: self.width * 0.24;
+                    stroke-color: root.failed ? Theme.danger : Theme.text;
+                    line-width: 1px;
+                    opacity: root.shown ? 0 : 0.7;
+                    animate width { duration: 900ms; delay: 260ms; easing: Theme.ease-out; }
+                    animate opacity { duration: 900ms; delay: 260ms; easing: Theme.ease-out; }
+                }
+
+                Mark {
+                    width: root.shown ? 40px : 76px;
+                    height: self.width;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    tint: root.failed ? Theme.danger : Theme.text;
+                    opacity: root.shown ? 1 : 0;
+                    animate width { duration: Theme.slow; easing: ease-out-back; }
+                    animate opacity { duration: Theme.quick; }
+                }
+            }
+
+            // Width has to be taken from the text, because a Rectangle's own
+            // preferred width is zero and this layout aligns to start rather
+            // than stretching its children.
+            Rectangle {
+                width: title.preferred-width;
+                height: 44px;
+                title := Text {
+                    height: 100%;
+                    text: root.headline;
+                    font-family: Theme.face;
+                    font-size: 34px;
+                    color: root.failed ? Theme.danger : Theme.text;
+                    vertical-alignment: center;
+                    opacity: root.shown ? 1 : 0;
+                    x: root.shown ? 0 : -12px;
+                    animate opacity { duration: Theme.slow; delay: 80ms; easing: Theme.ease-out; }
+                    animate x { duration: Theme.slow; delay: 80ms; easing: Theme.ease-out; }
+                }
+            }
+        }
+
+        Rectangle { height: 36px; }
+
+        Rectangle {
+            visible: root.failed;
+            height: root.failed ? 60px : 0px;
+
+            Text {
+                text: root.message;
+                font-family: Theme.face;
+                font-size: 14px;
+                color: Theme.text-dim;
+                wrap: word-wrap;
+                width: 100%;
+            }
+        }
+
+        Rectangle {
+            visible: !root.failed;
+            height: root.failed ? 0px : 260px;
+
+            VerticalLayout {
+                alignment: start;
+                spacing: 0;
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 160ms; } }
+
+                Rectangle {
+                    height: 34px;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; delay: 200ms; }
+                    StatRow { width: 100%; height: 100%; key: "ELAPSED"; value: root.elapsed; }
+                }
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 240ms; } }
+
+                Rectangle {
+                    height: 34px;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; delay: 280ms; }
+                    StatRow { width: 100%; height: 100%; key: "WRITTEN"; value: root.written; }
+                }
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 320ms; } }
+
+                Rectangle {
+                    height: 34px;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; delay: 360ms; }
+                    StatRow { width: 100%; height: 100%; key: "AVERAGE"; value: root.average; }
+                }
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 400ms; } }
+
+                Rectangle {
+                    height: 34px;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; delay: 440ms; }
+                    StatRow { width: 100%; height: 100%; key: "PEAK"; value: root.peak; }
+                }
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 480ms; } }
+
+                Rectangle {
+                    height: 34px;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; delay: 520ms; }
+                    StatRow { width: 100%; height: 100%; key: "TARGET"; value: root.target; }
+                }
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 560ms; } }
+
+                Rectangle {
+                    height: 34px;
+                    opacity: root.shown ? 1 : 0;
+                    animate opacity { duration: Theme.normal; delay: 600ms; }
+                    StatRow { width: 100%; height: 100%; key: "IMAGE"; value: root.image; }
+                }
+
+                Divider { opacity: root.shown ? 1 : 0; animate opacity { duration: Theme.normal; delay: 640ms; } }
+            }
+        }
+
+        Rectangle { height: 44px; }
+
+        HorizontalLayout {
+            alignment: space-between;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.normal; delay: 720ms; }
+
+            if root.failed: KeyHint { key: "ESC"; label: "BACK"; }
+            if !root.failed: Note { text: "REMOVE INSTALLATION MEDIA"; }
+        }
+    }
+}

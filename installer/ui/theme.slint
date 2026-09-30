@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+export global Theme {
+    // The press kit is monochrome. Red is the only chromatic value in the
+    // whole interface, which is what makes it read as a warning rather than
+    // as decoration.
+    out property <brush> ink: #000000;
+    out property <brush> surface: #0a0a0a;
+    out property <brush> surface-raised: #121212;
+    out property <brush> line: #272727;
+    out property <brush> line-active: #ffffff;
+    out property <brush> text: #ffffff;
+    // Deliberately lighter than they look correct on a calibrated editor
+    // display. These get read off a cheap panel in a bright room, often at a
+    // standing distance, and anything dimmer disappears entirely.
+    out property <brush> text-dim: #b8b8b8;
+    out property <brush> text-faint: #8a8a8a;
+    out property <brush> danger: #ff4d3d;
+
+    out property <string> face: "JetBrains Mono";
+
+    out property <length> unit: 8px;
+    // Large enough to read as a deliberate 45 degree cut rather than a
+    // rounded corner that failed.
+    out property <length> chamfer: 14px;
+
+    out property <duration> quick: 140ms;
+    out property <duration> normal: 260ms;
+    out property <duration> slow: 520ms;
+    out property <duration> hold-time: 1200ms;
+    // Seconds on the erase countdown, and how long a confirmed erase is shown
+    // as confirmed before the write starts.
+    out property <int> countdown: 5;
+    out property <duration> commit-hold: 450ms;
+    // Screen transitions.
+    out property <duration> slide: 560ms;
+    out property <length> slide-distance: 96px;
+    // How long the display gets to come up after the first frame before the
+    // boot fade starts.
+    out property <duration> display-settle: 500ms;
+    // Boot mark fade, then how long it rests before the first screen opens.
+    out property <duration> boot-fade: 700ms;
+    out property <duration> boot-hold: 1500ms;
+
+    out property <easing> ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    out property <easing> ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}

@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Unit]
+Description=CarbideOS installer interface
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target systemd-udevd.service systemd-udev-trigger.service
+# A failed installer must not drop to a silent console. Emergency at least
+# says something on screen. With RestartMode=direct it only fires once the
+# restarts below are used up.
+OnFailure=emergency.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# kernel-core carries bochs, vmwgfx, virtio-gpu and qxl, and coldplug loads
+# them after sysinit.target. Each one evicts simpledrm on probe, which yanks
+# the DRM device out from under a UI that opened it too early. Settling
+# first means the display we open is the one that stays. Bounded, and not
+# fatal, so a slow device elsewhere cannot hold the installer back.
+ExecStartPre=-/usr/bin/udevadm settle --timeout=10
+ExecStart=/usr/bin/carbide-installer
+# Only the software renderer is compiled in, but naming it explicitly stops
+# the backend selector from probing for GPU APIs that are not there.
+Environment=SLINT_BACKEND=linuxkms-software
+# Owns a VT so the kernel console stops drawing over the framebuffer once
+# the backend takes DRM master.
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+# A display handoff that still lands after startup kills the render loop.
+# Coming back up on the new device beats emergency mode.
+Restart=on-failure
+RestartMode=direct
+RestartSec=500ms
+
+[Install]
+WantedBy=carbide-installer.target

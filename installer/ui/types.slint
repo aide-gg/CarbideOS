@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+export struct DiskInfo {
+    node: string,
+    model: string,
+    size: string,
+    bus: string,
+    kind: string,
+    serial: string,
+    eligible: bool,
+    boot-media: bool,
+    note: string,
+    // What the operator types to confirm erasing this disk, one character per
+    // entry, and where it comes from: the kind ("SERIAL" or "DEVICE") and the
+    // text the code ends.
+    code-chars: [string],
+    code-kind: string,
+    code-context: string,
+}
+
+export enum Phase {
+    attract,
+    target,
+    confirm,
+    install,
+    summary,
+    failure,
+}

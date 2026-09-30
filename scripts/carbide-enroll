@@ -53,7 +53,7 @@ done
 
 [ -s "$ssh_key" ] || { printf 'Missing %s\n' "$ssh_key" >&2; exit 1; }
 
-ssh_options="-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8"
+ssh_options="-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o LogLevel=ERROR"
 ssh_options="$ssh_options -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 remote() {
@@ -111,15 +111,23 @@ for entry in $extensions; do
     path=${entry#*=}
     [ -s "$path" ] || { printf 'Missing extension image %s\n' "$path" >&2; exit 1; }
     printf '== installing the %s extension ==\n' "$name"
-    # The broker merges it and restarts Watchtower, and removes the image again
-    # if it fails to verify, so an unusable image cannot be left behind.
-    ops install-extension "$name" <"$path"
+    # The agent verifies, activates and health-gates it, rolling back on
+    # failure. An image built for another base is only staged, which would
+    # leave the node without it, so that counts as a failure here.
+    result=$(ops install-extension "$name" <"$path")
+    printf '  %s\n' "$result"
+    case "$result" in
+        *": active on "*) ;;
+        *)
+            printf '%s was not activated; is it built for the base this node runs?\n' \
+                "$name" >&2
+            exit 1
+            ;;
+    esac
+    # Marks the node as carrying it, so the agent gates boot on its health.
+    result=$(ops agent require "$name")
+    printf '  %s\n' "$result"
 done
-
-if [ -n "$extensions" ]; then
-    printf '== merged extensions ==\n'
-    remote 'systemd-sysext status --no-pager' | tail -n +2 | sed 's/^/  /'
-fi
 
 printf '== waiting for the node to report healthy ==\n'
 deadline=$(( $(date +%s) + 180 ))

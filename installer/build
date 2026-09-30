@@ -1,0 +1,337 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -eu
+umask 022
+
+cd "$(dirname "$0")/.."
+
+usage() {
+    printf 'Usage: %s [--fleet|--playground] [--image PATH | --version VER]\n' "$0" >&2
+    exit 2
+}
+
+variant=development
+image=
+want_version=
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --fleet) variant=fleet ;;
+        --playground) variant=playground ;;
+        --image)
+            shift
+            image=${1-}
+            [ -n "$image" ] || usage
+            ;;
+        --version)
+            shift
+            want_version=${1-}
+            [ -n "$want_version" ] || usage
+            ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+case "$variant" in
+    fleet)
+        secureboot_key=keys/production/secureboot/secureboot.key
+        secureboot_cert=keys/production/secureboot/secureboot.crt
+        image_name=carbideos-fleet
+        edition=Fleet
+        packages=dist/fleet
+        output=carbideos-installer-fleet
+        ;;
+    playground)
+        secureboot_key=keys/playground/secureboot/secureboot.key
+        secureboot_cert=keys/playground/secureboot/secureboot.crt
+        image_name=carbideos-playground
+        edition=Playground
+        packages=dist/playground
+        output=carbideos-installer-playground
+        ;;
+    development)
+        secureboot_key=keys/secureboot/secure-boot.key
+        secureboot_cert=keys/secureboot/secure-boot.crt
+        image_name=carbideos
+        edition=
+        packages=dist
+        output=carbideos-installer
+        ;;
+esac
+
+image=${image:-${CARBIDEOS_IMAGE:-}}
+
+# An installer carries one specific image, so which image it carries is worth
+# being explicit about. A released version can be named directly, an arbitrary
+# artifact can be pointed at, and only the unqualified case falls back to
+# building one.
+if [ -n "$want_version" ]; then
+    if [ -n "$image" ]; then
+        printf '%s\n' 'Use --image or --version, not both.' >&2
+        exit 2
+    fi
+    image="$packages/carbideos-$want_version/$image_name.raw.zst"
+    if [ ! -s "$image" ]; then
+        printf 'No packaged %s image for version %s.\n' "$image_name" "$want_version" >&2
+        printf 'Expected %s\n' "$image" >&2
+        exit 1
+    fi
+fi
+
+if [ -z "$image" ]; then
+    image="mkosi.output/$image_name.raw.zst"
+    if [ ! -s "$image" ]; then
+        printf 'No %s; building one first.\n' "$image"
+        case "$variant" in
+            development) ./scripts/build ;;
+            fleet) ./scripts/build --fleet ;;
+            playground) ./scripts/build --playground ;;
+        esac
+    fi
+fi
+
+if [ ! -s "$image" ]; then
+    printf 'Missing %s\n' "$image" >&2
+    exit 1
+fi
+
+# The label has to describe the image actually being carried. Taking it from
+# mkosi.version would stamp whatever the tree says right now onto an installer
+# built around a months-old packaged release.
+version=$want_version
+if [ -z "$version" ]; then
+    parent=$(basename "$(dirname "$image")")
+    case "$parent" in
+        carbideos-*) version=${parent#carbideos-} ;;
+    esac
+fi
+version=${version:-${CARBIDEOS_VERSION:-$(tr -d '[:space:]' <mkosi.version)}}
+case "$version" in
+    '' | *[!A-Za-z0-9._-]*)
+        printf 'Refusing to build version %s\n' "$version" >&2
+        exit 1
+        ;;
+esac
+
+for file in "$secureboot_key" "$secureboot_cert"; do
+    if [ ! -s "$file" ]; then
+        printf 'Missing %s; run make keys first.\n' "$file" >&2
+        exit 1
+    fi
+done
+
+if [ "$(stat -c '%a' "$secureboot_key")" -gt 600 ]; then
+    printf '%s\n' 'Private signing keys must not be group/world accessible.' >&2
+    exit 1
+fi
+
+for command in cargo mkosi xorriso zstd; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'Missing %s\n' "$command" >&2
+        exit 1
+    fi
+done
+
+# Partitioning tools live in sbin, which is not on a normal user's PATH even
+# though they need no privilege to read a regular file.
+sfdisk=$(command -v sfdisk 2>/dev/null || true)
+if [ -z "$sfdisk" ]; then
+    for candidate in /usr/sbin/sfdisk /sbin/sfdisk; do
+        if [ -x "$candidate" ]; then
+            sfdisk=$candidate
+            break
+        fi
+    done
+fi
+if [ -z "$sfdisk" ]; then
+    printf '%s\n' 'Missing sfdisk (util-linux).' >&2
+    exit 1
+fi
+
+# mkosi runs with installer/ as its project directory, so a path relative to
+# the repository root would be resolved against the wrong place.
+secureboot_key=$(realpath "$secureboot_key")
+secureboot_cert=$(realpath "$secureboot_cert")
+
+printf 'Building CarbideOS installer %s (%s)\n' "$version" "$variant"
+printf 'Carrying %s\n' "$image"
+
+# Compiled as the invoking user: a rustup-managed toolchain resolves through
+# a shim that reads this user's configuration, and building under sudo would
+# leave root-owned artifacts in the target directory.
+cargo build --release --locked --manifest-path installer/Cargo.toml \
+    --bin carbide-installer
+
+extra=$(mktemp -d)
+work=$(mktemp -d)
+private_work=
+cleanup() {
+    rm -rf "$extra" "$work"
+    [ -z "$private_work" ] || rm -rf "$private_work"
+}
+trap cleanup EXIT HUP INT TERM
+
+# Production and Playground keys are held encrypted at rest, so they are
+# opened into a private directory for the length of the build only. Asked for
+# once, and cleared from the environment before mkosi is reached.
+if [ "$variant" = fleet ] || [ "$variant" = playground ]; then
+    passphrase=${CARBIDEOS_SIGNING_KEY_PASSPHRASE:-}
+    if [ -z "$passphrase" ]; then
+        passphrase=$(systemd-ask-password \
+            "CarbideOS $variant signing passphrase:")
+    fi
+    private_work=$(mktemp -d)
+    chmod 0700 "$private_work"
+    export CARBIDEOS_SIGNING_KEY_PASSPHRASE="$passphrase"
+    openssl pkey -in "$secureboot_key" \
+        -passin env:CARBIDEOS_SIGNING_KEY_PASSPHRASE \
+        -out "$private_work/secureboot.key"
+    chmod 0600 "$private_work/secureboot.key"
+    secureboot_key="$private_work/secureboot.key"
+    unset CARBIDEOS_SIGNING_KEY_PASSPHRASE passphrase
+fi
+
+# The image is carried exactly as published, so what lands on the disk is
+# provably the artifact in the signed manifest. Repacking it would cost
+# roughly 100 MiB as well: the 2 GiB long-distance window finds matches
+# between the ESP's kernel image and the same content inside the root
+# filesystem, which no smaller window and no chunked format can reach.
+#
+# Only the uncompressed size is needed up front, because the frame header
+# does not declare it and the installer has to allocate before decoding.
+# Streaming it through wc avoids materialising 1.2 GiB on disk.
+printf 'Measuring %s\n' "$image"
+raw_size=$(zstd --long=31 -dc "$image" | wc -c)
+case "$raw_size" in
+    '' | *[!0-9]* | 0)
+        printf 'Could not determine the uncompressed size of %s\n' "$image" >&2
+        exit 1
+        ;;
+esac
+
+install -D -m 0755 installer/target/release/carbide-installer \
+    "$extra/usr/bin/carbide-installer"
+install -D -m 0444 "$image" "$extra/usr/share/carbideos/image.raw.zst"
+install -d -m 0755 "$extra/usr/share/carbideos"
+printf 'size=%s\nlabel=%s %s\n' "$raw_size" "$image_name" "$version" \
+    >"$extra/usr/share/carbideos/image.meta"
+chmod 0444 "$extra/usr/share/carbideos/image.meta"
+
+printf 'Carrying %s uncompressed bytes\n' "$raw_size"
+
+# Version and edition are properties of this build, not of the checked-in
+# unit, so they arrive as a drop-in rather than being baked into the service
+# file. Development builds carry no edition and read as plain CarbideOS.
+install -d -m 0755 \
+    "$extra/usr/lib/systemd/system/carbide-installer.service.d"
+printf '[Service]\nEnvironment=CARBIDE_VERSION=%s\nEnvironment=CARBIDE_EDITION=%s\n' \
+    "$version" "$edition" \
+    >"$extra/usr/lib/systemd/system/carbide-installer.service.d/version.conf"
+chmod 0444 "$extra/usr/lib/systemd/system/carbide-installer.service.d/version.conf"
+
+# Replace only this installer's own artifacts, the way scripts/build does.
+# mkosi refuses to overwrite an existing output, and the large tools tree
+# under mkosi.output must survive. Versioned artifacts are cleared only for
+# the version being rebuilt, so installers carrying other releases survive.
+if [ -d mkosi.output ]; then
+    find mkosi.output -maxdepth 1 \( -type f -o -type l \) \
+        \( -name "$output.*" -o -name "${output}_${version}.*" \) -delete
+    rm -f "mkosi.output/$output"
+fi
+
+mkosi --directory installer \
+    --extra-tree="$extra" \
+    --output="$output" \
+    --image-id="$output" \
+    --secure-boot-key="$secureboot_key" \
+    --secure-boot-certificate="$secureboot_cert" \
+    build
+
+# Format=esp writes the ESP as the image itself, so it lands under the plain
+# output name rather than an .esp.raw split artifact.
+disk="mkosi.output/$output.raw"
+if [ ! -s "$disk" ] && [ -s "$disk.zst" ]; then
+    zstd -d -q -f "$disk.zst" -o "$disk"
+fi
+if [ ! -s "$disk" ]; then
+    printf 'mkosi did not produce %s\n' "$disk" >&2
+    exit 1
+fi
+
+# That image is a GPT disk containing the ESP, not a bare filesystem. El
+# Torito needs the FAT partition itself, so it gets carved out: firmware
+# handed the whole disk image would look for a filesystem and find a
+# partition table.
+esp_start=$("$sfdisk" --json "$disk" |
+    sed -n 's/.*"start": *\([0-9]*\).*/\1/p' | head -1)
+esp_size=$("$sfdisk" --json "$disk" |
+    sed -n 's/.*"size": *\([0-9]*\).*/\1/p' | head -1)
+case "${esp_start:-}${esp_size:-}" in
+    '' | *[!0-9]*)
+        printf 'Could not locate the ESP partition inside %s\n' "$disk" >&2
+        exit 1
+        ;;
+esac
+
+esp="$work/efiboot.img"
+dd if="$disk" of="$esp" bs=512 skip="$esp_start" count="$esp_size" \
+    status=none
+
+# Keep the ESP inside the ISO volume: OVMF uses its end to size large El
+# Torito images. -efi-boot-part would move it past the volume end, so the
+# in-tree file is exposed as an MBR 0xEF partition for USB booting instead.
+iso="mkosi.output/${output}_${version}.iso"
+printf 'Wrapping %s into %s\n' "$esp" "$iso"
+iso_root="$work/iso"
+mkdir -p "$iso_root"
+mv "$esp" "$iso_root/efiboot.img"
+cat >"$iso_root/README.txt" <<EOF
+CarbideOS installer $version
+Boot this image over UEFI. The installer is a Unified Kernel Image in the
+EFI system partition embedded in this ISO.
+EOF
+
+xorriso -as mkisofs \
+    -iso-level 3 \
+    -volid "CARBIDEOS_INSTALL" \
+    -e efiboot.img \
+    -no-emul-boot \
+    -part_like_isohybrid \
+    -isohybrid-gpt-basdat \
+    -quiet \
+    -o "$iso" \
+    "$iso_root"
+
+# The PVD's volume space size (2 KiB blocks at byte 32848) must reach the end
+# of the ESP, or OVMF sizes the boot image as empty and reports Not Found.
+volume_blocks=$(od -An -t u4 -j 32848 -N 4 "$iso" | tr -d ' ')
+iso_blocks=$(( $(stat -c '%s' "$iso") / 2048 ))
+if [ "$volume_blocks" -lt "$iso_blocks" ]; then
+    printf 'ISO volume ends at block %s but the image is %s blocks; the ESP lies outside it\n' \
+        "$volume_blocks" "$iso_blocks" >&2
+    exit 1
+fi
+
+# Collected into dist/ the way the image build publishes its own artifacts,
+# so mkosi.output stays scratch. The directory is named for the version of
+# the image being carried, which is what distinguishes two installers built
+# from the same tree.
+case "$variant" in
+    fleet) release="dist/fleet/carbideos-installer-$version" ;;
+    playground) release="dist/playground/carbideos-installer-$version" ;;
+    development) release="dist/carbideos-installer-$version" ;;
+esac
+
+install -d "$release"
+cp --preserve=mode,timestamps "$iso" "$release/"
+cp --preserve=mode,timestamps "mkosi.output/$output.efi" \
+    "$release/${output}_${version}.efi"
+(
+    cd "$release"
+    sha256sum "${output}_${version}.iso" "${output}_${version}.efi" \
+        >SHA256SUMS
+)
+
+printf 'Published %s\n' "$release/${output}_${version}.iso"
+printf '          %s\n' "$release/${output}_${version}.efi"

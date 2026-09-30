@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "carbide-installer"
+version = "0.1.0"
+edition = "2024"
+description = "CarbideOS bare-metal installer rendered directly to DRM/KMS"
+license = "AGPL-3.0-or-later"
+
+[[bin]]
+name = "carbide-installer"
+path = "src/main.rs"
+
+# Renders each screen to a PNG on the host so the interface can be reviewed
+# without booting hardware. Opt-in, and never built for the image.
+[[bin]]
+name = "carbide-preview"
+path = "src/bin/preview.rs"
+required-features = ["preview"]
+
+# Records the boot sequence as raw 60 fps frames for ffmpeg. Opt-in, like the
+# preview.
+[[bin]]
+name = "carbide-record"
+path = "src/bin/record.rs"
+required-features = ["preview"]
+
+[features]
+preview = ["dep:png"]
+
+[dependencies]
+# The software renderer draws through DRM dumb buffers, which every UEFI
+# machine exposes through simpledrm even with no GPU driver or firmware
+# present. That is what keeps the UKI small and the installer bootable on
+# hardware we have never seen.
+# compat-1-18 rather than compat-1-2: the older compatibility feature
+# force-enables libseat on the linuxkms backend, which would undo the whole
+# point of selecting the noseat variant. There is no session manager in an
+# initrd, and the installer is already root.
+slint = { version = "1.18", default-features = false, features = [
+    "compat-1-18",
+    "std",
+    "backend-linuxkms-noseat",
+    "renderer-software",
+] }
+# Streaming decode straight into a caller-owned buffer. The high-level `zstd`
+# crate only writes into a `Write` sink, which would mean an extra copy of
+# 1.2 GiB and would stop zstd from using the destination as its own match
+# history.
+zstd-safe = "8"
+libc = "0.2"
+png = { version = "0.18", optional = true }
+
+[build-dependencies]
+slint-build = "1.18"
+
+# Slint's software renderer repaints a whole Path whenever any part of it is in
+# the frame's dirty region, wiping content drawn over it on partial repaints.
+# Vendored with paths clipped to the dirty region; drop once fixed upstream.
+[patch.crates-io]
+i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

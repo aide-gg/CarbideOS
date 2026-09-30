@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { Theme } from "theme.slint";
+
+// Every panel edge in the interface is cut at 45 degrees, the same cut the
+// logo mark uses. Drawn as a real path rather than faked with corner pieces
+// so it survives on top of non-solid backgrounds.
+export component Chamfer inherits Path {
+    in property <length> cut: Theme.chamfer;
+    in property <brush> fill-color: transparent;
+    in property <brush> stroke-color: transparent;
+    in property <length> line-width: 1px;
+
+    property <float> w: root.width / 1px;
+    property <float> h: root.height / 1px;
+    property <float> c: min(root.cut / 1px, root.w / 2, root.h / 2);
+
+    viewbox-width: root.w;
+    viewbox-height: root.h;
+    fill: root.fill-color;
+    stroke: root.stroke-color;
+    stroke-width: root.line-width;
+
+    MoveTo { x: root.c; y: 0; }
+    LineTo { x: root.w - root.c; y: 0; }
+    LineTo { x: root.w; y: root.c; }
+    LineTo { x: root.w; y: root.h - root.c; }
+    LineTo { x: root.w - root.c; y: root.h; }
+    LineTo { x: root.c; y: root.h; }
+    LineTo { x: 0; y: root.h - root.c; }
+    LineTo { x: 0; y: root.c; }
+    Close { }
+}
+
+// The CarbideOS mark, lifted verbatim from the press kit SVG. The viewbox is
+// cropped to the glyph's own bounds so layout padding stays under our control.
+export component Mark inherits Path {
+    in property <brush> tint: Theme.text;
+
+    viewbox-x: 447;
+    viewbox-y: 418;
+    viewbox-width: 370;
+    viewbox-height: 368;
+    fill: root.tint;
+
+    commands: "M 532 418 L 447 507 L 447 701 L 532 786 L 772 786 L 816 742 L 549 742 L 489 682 L 489 526 L 549 466 L 817 466 L 772 418 Z";
+}
+
+// The press-kit wordmark, pre-rasterised at exactly the size it is drawn.
+// Scaled down by the software renderer its hairline strokes break up.
+export component Wordmark inherits Image {
+    source: @image-url("assets/wordmark-56.png");
+    width: 487px;
+    height: 56px;
+}
+
+// The mark alone, for screen headers.
+export component Brand inherits Mark {
+    width: 24px;
+    height: 24px;
+}
+
+export component Label inherits Text {
+    font-family: Theme.face;
+    color: Theme.text;
+    font-size: 15px;
+}
+
+// Small uppercase caption with wide tracking. Used for every field name so
+// the eye can separate labels from values without a second colour.
+export component Caption inherits Text {
+    font-family: Theme.face;
+    color: Theme.text-faint;
+    font-size: 11px;
+    letter-spacing: 2px;
+}
+
+// Small chamfered label, cut like every panel edge.
+export component Tag inherits Rectangle {
+    in property <string> text;
+    width: label.preferred-width + 26px;
+    height: 30px;
+
+    Chamfer {
+        width: 100%;
+        height: 100%;
+        cut: 8px;
+        stroke-color: Theme.text-faint;
+        line-width: 1px;
+    }
+
+    label := Text {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        text: root.text;
+        font-family: Theme.face;
+        font-size: 13px;
+        letter-spacing: 4px;
+        color: Theme.text;
+    }
+}
+
+// Footer key hint: the key at full strength, its action a step down.
+export component KeyHint inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> label;
+    spacing: 12px;
+
+    Text {
+        text: root.key;
+        font-family: Theme.face;
+        font-size: 13px;
+        letter-spacing: 2px;
+        color: Theme.text;
+        vertical-alignment: center;
+    }
+
+    Text {
+        text: root.label;
+        font-family: Theme.face;
+        font-size: 13px;
+        letter-spacing: 2px;
+        color: Theme.text-dim;
+        vertical-alignment: center;
+    }
+}
+
+// Footer text that is not a key hint, at the same size as one.
+export component Note inherits Text {
+    font-family: Theme.face;
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: Theme.text-dim;
+    vertical-alignment: center;
+}
+
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.line;
+}
+
+// A determinate bar with a travelling highlight. The highlight is a plain
+// translation, which the software renderer handles; a rotating spinner would
+// not render at all.
+export component Meter inherits Rectangle {
+    in property <float> value: 0;
+    in property <bool> active: false;
+
+    height: 3px;
+    background: Theme.line;
+
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(root.value, 0, 1);
+        height: parent.height;
+        background: Theme.text;
+        animate width { duration: Theme.normal; easing: Theme.ease-out; }
+    }
+
+    Rectangle {
+        clip: true;
+        width: parent.width * clamp(root.value, 0, 1);
+        height: parent.height;
+        opacity: root.active ? 1 : 0;
+        animate opacity { duration: Theme.normal; }
+
+        sheen := Rectangle {
+            width: 120px;
+            height: parent.height;
+            background: @linear-gradient(90deg, #ffffff00 0%, #ffffff 50%, #ffffff00 100%);
+            x: -self.width;
+        }
+    }
+
+    // Driven by a property animation looping through a timer-free cycle.
+    states [
+        running when root.active: {
+            sheen.x: root.width;
+            in { animate sheen.x { duration: 1100ms; iteration-count: -1; easing: linear; } }
+        }
+    ]
+}
+
+export component StatRow inherits Rectangle {
+    in property <string> key;
+    in property <string> value;
+    in property <brush> value-color: Theme.text;
+
+    height: 34px;
+
+    HorizontalLayout {
+        alignment: space-between;
+        Caption {
+            text: root.key;
+            vertical-alignment: center;
+        }
+
+        Text {
+            font-family: Theme.face;
+            text: root.value;
+            color: root.value-color;
+            font-size: 15px;
+            vertical-alignment: center;
+        }
+    }
+}

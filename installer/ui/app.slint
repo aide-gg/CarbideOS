@@ -1,0 +1,480 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { Theme } from "theme.slint";
+import { DiskInfo, Phase } from "types.slint";
+import { AttractEditorial, AttractMinimal, AttractBackdrop, TargetPick, Confirm, Progress, Summary } from "screens.slint";
+import { KeyHint, Note } from "components.slint";
+
+export { DiskInfo, Phase }
+
+export component AppWindow inherits Window {
+    title: "CarbideOS Installer";
+    background: Theme.ink;
+    default-font-family: Theme.face;
+    forward-focus: keys;
+
+    in property <Phase> phase: Phase.attract;
+    in property <string> version: "";
+    // Fleet, Playground, or empty for a development build.
+    in property <string> edition: "";
+    in property <string> scan-status: "Scanning storage devices";
+    in property <string> image-status: "";
+    // First-screen design under review: 0 editorial, 1 minimal, 2 backdrop.
+    in property <int> attract-variant: 2;
+    // Erase confirmation: 0 hold, 1 type the code, 2 countdown. All three are
+    // kept working; typing the code is the one in use.
+    in property <int> confirm-style: 1;
+    in property <[DiskInfo]> disks: [];
+    in-out property <int> selected: 0;
+
+    in property <float> progress: 0;
+    in property <string> stage: "";
+    in property <string> detail: "";
+
+    in property <string> summary-headline: "";
+    in property <string> summary-elapsed: "";
+    in property <string> summary-written: "";
+    in property <string> summary-average: "";
+    in property <string> summary-peak: "";
+    in property <string> summary-target: "";
+    in property <string> summary-image: "";
+    in property <string> summary-message: "";
+
+    callback begin-install(int);
+    callback rescan();
+    callback reboot();
+    callback poweroff();
+    callback proceed();
+    callback choose();
+    callback back();
+
+    // Set by the host once the first frame is on screen. A property only
+    // animates from a value that was actually rendered, so nothing may start
+    // the boot fade before then.
+    in-out property <bool> presented: false;
+
+    // The first frame often triggers a mode set or a VM window resize, and the
+    // display is blank while it settles. The fade waits that out behind a
+    // near-black fill that forces a full frame onto the screen.
+    property <bool> mounted: false;
+    Timer {
+        interval: Theme.display-settle;
+        running: root.presented && !root.mounted;
+        triggered => { root.mounted = true; }
+    }
+
+    // The installer is ready almost immediately; this holds the boot mark long
+    // enough to be seen before the first screen opens out of it.
+    property <bool> booted: false;
+    Timer {
+        interval: Theme.boot-hold;
+        running: root.mounted && !root.booted;
+        triggered => { root.booted = true; }
+    }
+
+    // Erase confirmation. Every style ends in `committed`, which holds the
+    // confirmed state on screen for a beat before the write starts.
+    in-out property <bool> holding: false;
+    in-out property <float> hold-value: 0;
+    // Accelerating while arming, fast on release, so letting go feels like an
+    // abort rather than a rewind.
+    animate hold-value {
+        duration: root.holding ? Theme.hold-time : 180ms;
+        easing: root.holding ? ease-in : ease-out;
+    }
+    in-out property <int> typed: 0;
+    in-out property <bool> armed: false;
+    in-out property <int> count: Theme.countdown;
+    in-out property <float> arm-value: 0;
+    animate arm-value {
+        duration: root.armed ? Theme.countdown * 1s : 220ms;
+        easing: linear;
+    }
+    property <bool> committed: false;
+    // Bumped on a rejected attempt; the confirm control shakes on each change.
+    property <int> miss: 0;
+
+    Timer {
+        interval: Theme.hold-time;
+        running: root.holding;
+        triggered => {
+            root.holding = false;
+            root.commit();
+        }
+    }
+
+    Timer {
+        interval: 1s;
+        running: root.armed && !root.committed;
+        triggered => {
+            root.count -= 1;
+            if (root.count <= 0) {
+                root.commit();
+            }
+        }
+    }
+
+    // Stays committed until the confirm screen has slid away, so it does not
+    // flash back to its unconfirmed state on the way out.
+    Timer {
+        interval: Theme.commit-hold;
+        running: root.committed && root.phase == Phase.confirm;
+        triggered => { root.begin-install(root.selected); }
+    }
+
+    // Nothing has been written outside the install screen, so power keys are
+    // safe everywhere else. Typing a confirmation code needs the letters.
+    property <bool> system-keys: root.phase != Phase.install
+        && !(root.phase == Phase.confirm && (root.committed || root.confirm-style == 1));
+
+    function move-selection(step: int) {
+        if (root.disks.length == 0) {
+            return;
+        }
+        root.selected = clamp(root.selected + step, 0, root.disks.length - 1);
+    }
+
+    function selected-eligible() -> bool {
+        return root.disks.length > 0 && root.disks[root.selected].eligible;
+    }
+
+    function enter-confirm() {
+        root.holding = false;
+        root.hold-value = 0;
+        root.typed = 0;
+        root.armed = false;
+        root.count = Theme.countdown;
+        root.arm-value = 0;
+        root.committed = false;
+        root.choose();
+    }
+
+    function commit() {
+        root.committed = true;
+    }
+
+    function arm() {
+        if (!root.holding && !root.committed && root.selected-eligible()) {
+            root.holding = true;
+            root.hold-value = 1;
+        }
+    }
+
+    function disarm() {
+        if (root.holding && root.hold-value < 1) {
+            root.miss += 1;
+        }
+        root.holding = false;
+        root.hold-value = 0;
+    }
+
+    function start-countdown() {
+        if (!root.armed && !root.committed && root.selected-eligible()) {
+            root.count = Theme.countdown;
+            root.armed = true;
+            root.arm-value = 1;
+        }
+    }
+
+    function abort-countdown() {
+        root.armed = false;
+        root.count = Theme.countdown;
+        root.arm-value = 0;
+    }
+
+    function type-key(text: string) -> bool {
+        if (text == Key.Backspace) {
+            root.typed = max(0, root.typed - 1);
+            return true;
+        }
+        // Letters change case and digits parse; modifiers and navigation keys
+        // do neither, so they are ignored rather than counted as a typo.
+        if (!text.is-float() && text.to-uppercase() == text.to-lowercase()) {
+            return false;
+        }
+        let code = root.disks[root.selected].code-chars;
+        if (root.typed < code.length && text.to-uppercase() == code[root.typed]) {
+            root.typed += 1;
+            if (root.typed >= code.length) {
+                root.commit();
+            }
+        } else {
+            root.typed = 0;
+            root.miss += 1;
+        }
+        return true;
+    }
+
+    pure function order(p: Phase) -> int {
+        if (p == Phase.attract) {
+            return 0;
+        }
+        if (p == Phase.target) {
+            return 1;
+        }
+        if (p == Phase.confirm) {
+            return 2;
+        }
+        if (p == Phase.install) {
+            return 3;
+        }
+        return 4;
+    }
+
+    // Screens slide in the direction of travel: forward from the right, back
+    // from the left.
+    pure function offset(p: Phase) -> length {
+        if (root.order(p) == root.order(root.phase)) {
+            return 0px;
+        }
+        return root.order(p) < root.order(root.phase) ? -Theme.slide-distance : Theme.slide-distance;
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #030303;
+        visible: !root.mounted;
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.system-keys) {
+                if (event.text == "r" || event.text == "R") {
+                    root.reboot();
+                    return accept;
+                }
+                if (event.text == "p" || event.text == "P") {
+                    root.poweroff();
+                    return accept;
+                }
+            }
+            if (root.phase == Phase.attract) {
+                if (event.text == Key.Return) {
+                    root.proceed();
+                    return accept;
+                }
+            } else if (root.phase == Phase.target) {
+                if (event.text == Key.UpArrow) {
+                    root.move-selection(-1);
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.move-selection(1);
+                    return accept;
+                }
+                if (event.text == Key.Return) {
+                    if (root.selected-eligible()) {
+                        root.enter-confirm();
+                    }
+                    return accept;
+                }
+                if (event.text == "s" || event.text == "S") {
+                    root.rescan();
+                    return accept;
+                }
+            } else if (root.phase == Phase.confirm) {
+                if (root.committed) {
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    if (root.confirm-style == 2 && root.armed) {
+                        root.abort-countdown();
+                    } else {
+                        root.disarm();
+                        root.back();
+                    }
+                    return accept;
+                }
+                if (root.confirm-style == 0 && event.text == Key.Return) {
+                    root.arm();
+                    return accept;
+                }
+                if (root.confirm-style == 1 && root.type-key(event.text)) {
+                    return accept;
+                }
+                if (root.confirm-style == 2 && event.text == Key.Return) {
+                    root.start-countdown();
+                    return accept;
+                }
+            } else if (root.phase == Phase.summary || root.phase == Phase.failure) {
+                if (event.text == Key.Return) {
+                    root.reboot();
+                    return accept;
+                }
+                if (event.text == Key.Escape && root.phase == Phase.failure) {
+                    root.back();
+                    return accept;
+                }
+            }
+            return reject;
+        }
+
+        key-released(event) => {
+            if (root.phase == Phase.confirm && root.confirm-style == 0
+                    && event.text == Key.Return && !root.committed) {
+                root.disarm();
+                return accept;
+            }
+            return reject;
+        }
+
+        // Screens are all resident, sliding and fading between phases.
+        // Creating them on demand would skip the entry animations, which run
+        // off `shown`.
+        Rectangle {
+            x: root.offset(Phase.attract);
+            opacity: root.phase == Phase.attract ? 1 : 0;
+            visible: self.opacity > 0;
+            animate x { duration: Theme.slide; easing: Theme.ease-out; }
+            animate opacity { duration: Theme.normal; }
+            if root.attract-variant == 0: AttractEditorial {
+                width: 100%;
+                height: 100%;
+                version: root.version;
+                edition: root.edition;
+                status: root.scan-status;
+                image-status: root.image-status;
+                mark-in: root.mounted;
+                shown: root.booted;
+            }
+            if root.attract-variant == 1: AttractMinimal {
+                width: 100%;
+                height: 100%;
+                version: root.version;
+                edition: root.edition;
+                status: root.scan-status;
+                image-status: root.image-status;
+                mark-in: root.mounted;
+                shown: root.booted;
+            }
+            if root.attract-variant == 2: AttractBackdrop {
+                width: 100%;
+                height: 100%;
+                version: root.version;
+                edition: root.edition;
+                status: root.scan-status;
+                image-status: root.image-status;
+                mark-in: root.mounted;
+                shown: root.booted;
+            }
+        }
+
+        Rectangle {
+            x: root.offset(Phase.target);
+            opacity: root.phase == Phase.target ? 1 : 0;
+            visible: self.opacity > 0;
+            animate x { duration: Theme.slide; easing: Theme.ease-out; }
+            animate opacity { duration: Theme.normal; }
+            TargetPick {
+                width: 100%;
+                height: 100%;
+                disks: root.disks;
+                selected: root.selected;
+                image-status: root.image-status;
+                shown: root.phase == Phase.target;
+                pick(idx) => {
+                    root.selected = idx;
+                    if (root.disks[idx].eligible) {
+                        root.enter-confirm();
+                    }
+                }
+                rescan => { root.rescan(); }
+            }
+        }
+
+        Rectangle {
+            x: root.offset(Phase.confirm);
+            opacity: root.phase == Phase.confirm ? 1 : 0;
+            visible: self.opacity > 0;
+            animate x { duration: Theme.slide; easing: Theme.ease-out; }
+            animate opacity { duration: Theme.normal; }
+            Confirm {
+                width: 100%;
+                height: 100%;
+                disk: root.disks.length > 0 ? root.disks[root.selected] : { model: "", node: "", size: "", bus: "" };
+                shown: root.phase == Phase.confirm;
+                confirm-style: root.confirm-style;
+                hold: root.hold-value;
+                holding: root.holding;
+                committed: root.committed;
+                typed: root.typed;
+                armed: root.armed;
+                count: root.count;
+                arm: root.arm-value;
+                miss: root.miss;
+                hold-start => { root.arm(); }
+                hold-end => { root.disarm(); }
+            }
+        }
+
+        Rectangle {
+            x: root.offset(Phase.install);
+            opacity: root.phase == Phase.install ? 1 : 0;
+            visible: self.opacity > 0;
+            animate x { duration: Theme.slide; easing: Theme.ease-out; }
+            animate opacity { duration: Theme.normal; }
+            Progress {
+                width: 100%;
+                height: 100%;
+                value: root.progress;
+                stage: root.stage;
+                detail: root.detail;
+                target: root.summary-target;
+                shown: root.phase == Phase.install;
+            }
+        }
+
+        Rectangle {
+            x: root.offset(Phase.summary);
+            opacity: (root.phase == Phase.summary || root.phase == Phase.failure) ? 1 : 0;
+            visible: self.opacity > 0;
+            animate x { duration: Theme.slide; easing: Theme.ease-out; }
+            animate opacity { duration: Theme.normal; }
+            Summary {
+                width: 100%;
+                height: 100%;
+                shown: root.phase == Phase.summary || root.phase == Phase.failure;
+                failed: root.phase == Phase.failure;
+                headline: root.summary-headline;
+                elapsed: root.summary-elapsed;
+                written: root.summary-written;
+                average: root.summary-average;
+                peak: root.summary-peak;
+                target: root.summary-target;
+                image: root.summary-image;
+                version: root.version;
+                message: root.summary-message;
+            }
+        }
+
+        // Power keys, pinned bottom right on every screen. While the image is
+        // being written they give way to a warning instead.
+        HorizontalLayout {
+            x: root.width - 64px - self.width;
+            y: root.height - 64px - self.height;
+            width: self.preferred-width;
+            height: 20px;
+            spacing: 40px;
+            opacity: root.system-keys && (root.phase != Phase.attract || root.booted) ? 1 : 0;
+            animate opacity { duration: Theme.normal; }
+
+            // Once there is nothing left to do, Enter reboots as well and is
+            // the key worth showing.
+            KeyHint {
+                key: root.phase == Phase.summary || root.phase == Phase.failure ? "ENTER" : "R";
+                label: "REBOOT";
+            }
+            KeyHint { key: "P"; label: "POWER OFF"; }
+        }
+
+        Note {
+            x: root.width - 64px - self.width;
+            y: root.height - 64px - self.height;
+            height: 20px;
+            text: "WRITING  ·  DO NOT POWER OFF";
+            color: Theme.danger;
+            opacity: root.phase == Phase.install ? 1 : 0;
+            animate opacity { duration: Theme.normal; }
+        }
+    }
+}

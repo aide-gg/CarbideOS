@@ -1,0 +1,146 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Install Watchtower on a fleet CarbideOS node, given only its address.
+#
+# Watchtower's release CI attaches a fleet-signed sysext per CarbideOS base, and
+# the agent only activates an image built for the base it is running. So this
+# asks the node which base it runs, fetches the newest matching asset from
+# GitHub, and hands it to carbide-enroll with the credentials in dist/secrets.
+set -eu
+umask 077
+
+cd "$(dirname "$0")/.."
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: carbide-install-watchtower HOST [options]
+
+  --release TAG      Watchtower release to install, defaults to the newest
+                     one with a sysext for the node's CarbideOS version
+  --repo OWNER/NAME  defaults to aide-gg/watchtower
+
+Any further options are passed to carbide-enroll, for example:
+  --credentials FILE  --github-token FILE  --ssh-user USER  --ssh-key FILE
+EOF
+    exit 2
+}
+
+host=
+release=
+repo=aide-gg/watchtower
+credentials=dist/secrets/node-credentials
+github_token=dist/secrets/github-token
+ssh_user=ace-mgmt
+ssh_key=keys/admin/ace-mgmt.pub
+timeout=600
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --release) release=${2:?}; shift 2 ;;
+        --repo) repo=${2:?}; shift 2 ;;
+        --credentials) credentials=${2:?}; shift 2 ;;
+        --github-token) github_token=${2:?}; shift 2 ;;
+        --ssh-user) ssh_user=${2:?}; shift 2 ;;
+        --ssh-key) ssh_key=${2:?}; shift 2 ;;
+        --timeout) timeout=${2:?}; shift 2 ;;
+        -*) usage ;;
+        *) [ -z "$host" ] || usage; host=$1; shift ;;
+    esac
+done
+[ -n "$host" ] || usage
+
+for command in gh sha256sum ssh; do
+    command -v "$command" >/dev/null 2>&1 || {
+        printf 'Missing required command: %s\n' "$command" >&2
+        exit 1
+    }
+done
+[ -s "$ssh_key" ] || { printf 'Missing %s\n' "$ssh_key" >&2; exit 1; }
+
+if [ -z "${GH_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1 && [ -s "$github_token" ]; then
+    GH_TOKEN=$(tr -d '\n' <"$github_token")
+    export GH_TOKEN
+fi
+
+ssh_options="-o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8 -o LogLevel=ERROR"
+ssh_options="$ssh_options -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+remote() {
+    # shellcheck disable=SC2086
+    ssh $ssh_options -i "$ssh_key" "$ssh_user@$host" "$@"
+}
+
+printf '== waiting for %s ==\n' "$host"
+deadline=$(( $(date +%s) + timeout ))
+until remote 'true' 2>/dev/null; do
+    [ "$(date +%s)" -lt "$deadline" ] || {
+        printf 'Timed out waiting for SSH on %s\n' "$host" >&2
+        exit 1
+    }
+    sleep 5
+done
+
+base=$(remote 'cat /etc/os-release' | sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p')
+printf '%s' "$base" | grep -qE '^[0-9][0-9A-Za-z.]*$' || {
+    printf 'Could not read the CarbideOS version of %s\n' "$host" >&2
+    exit 1
+}
+printf '  running CarbideOS %s\n' "$base"
+
+asset_suffix="-carbideos-${base}-x86_64.sysext.raw"
+
+# The newest published release that carries a sysext for this base. A new base
+# only gets sysexts once CI rebuilds for it, so the latest release may not.
+if [ -z "$release" ]; then
+    printf '== finding the newest Watchtower release for CarbideOS %s ==\n' "$base"
+    release=$(gh api --paginate "repos/$repo/releases" --jq "
+        .[] | select((.draft or .prerelease) | not)
+            | select(any(.assets[]; .name | endswith(\"$asset_suffix\")))
+            | .tag_name" | head -n 1)
+    [ -n "$release" ] || {
+        printf 'No %s release has a sysext for CarbideOS %s\n' "$repo" "$base" >&2
+        printf 'Run its "CarbideOS Watchtower Sysext" workflow for %s first.\n' "$base" >&2
+        exit 1
+    }
+fi
+
+# Scratch goes on disk: /tmp is tmpfs here and these images are large.
+: "${TMPDIR:=$PWD/dist/scratch}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+pattern="watchtower-*$asset_suffix"
+printf '== fetching Watchtower %s for CarbideOS %s ==\n' "$release" "$base"
+gh release download "$release" --repo "$repo" --dir "$work" \
+    --pattern "$pattern" --pattern "$pattern.sha256" || {
+    printf 'No Watchtower sysext for CarbideOS %s in %s release %s\n' \
+        "$base" "$repo" "$release" >&2
+    exit 1
+}
+
+set -- "$work"/watchtower-*"$asset_suffix"
+if [ "$#" -ne 1 ] || [ ! -s "$1" ]; then
+    printf 'Expected exactly one sysext for CarbideOS %s\n' "$base" >&2
+    exit 1
+fi
+image=$1
+(cd "$work" && sha256sum --quiet -c "${image##*/}.sha256")
+printf '  %s\n' "${image##*/}"
+
+set -- --extension "watchtower=$image" \
+    --ssh-user "$ssh_user" --ssh-key "$ssh_key" --timeout "$timeout"
+if [ -s "$credentials" ]; then
+    set -- "$@" --credentials "$credentials"
+else
+    printf 'No credentials at %s, skipping\n' "$credentials" >&2
+fi
+if [ -s "$github_token" ]; then
+    set -- "$@" --github-token "$github_token"
+else
+    printf 'No release token at %s, skipping\n' "$github_token" >&2
+fi
+
+./scripts/carbide-enroll "$host" "$@"

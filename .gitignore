@@ -9,6 +9,8 @@
 /dist/
 /logs/
 /agent/target/
+/installer/target/
+/installer/preview/
 
 # Private local signing material and generated mkosi overrides
 /keys/
