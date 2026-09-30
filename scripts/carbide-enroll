@@ -22,6 +22,8 @@ Usage: carbide-enroll HOST [options]
   --credentials FILE     KEY=VALUE lines to install as node credentials
   --github-token FILE    token used to fetch private ACE releases
   --extension NAME=PATH  signed extension image to install (repeatable)
+  --acquire NAME         extension the node fetches from its update feed for
+                         the base it runs, e.g. chrome (repeatable)
   --ssh-user USER        defaults to ace-mgmt
   --ssh-key FILE         defaults to keys/admin/ace-mgmt.pub
   --timeout SECONDS      how long to wait for SSH, defaults to 600
@@ -33,6 +35,7 @@ host=
 credentials=
 github_token=
 extensions=
+acquire=
 ssh_user=ace-mgmt
 ssh_key=keys/admin/ace-mgmt.pub
 timeout=600
@@ -42,6 +45,7 @@ while [ "$#" -gt 0 ]; do
         --credentials) credentials=${2:?}; shift 2 ;;
         --github-token) github_token=${2:?}; shift 2 ;;
         --extension) extensions="$extensions ${2:?}"; shift 2 ;;
+        --acquire) acquire="$acquire ${2:?}"; shift 2 ;;
         --ssh-user) ssh_user=${2:?}; shift 2 ;;
         --ssh-key) ssh_key=${2:?}; shift 2 ;;
         --timeout) timeout=${2:?}; shift 2 ;;
@@ -125,6 +129,28 @@ for entry in $extensions; do
             ;;
     esac
     # Marks the node as carrying it, so the agent gates boot on its health.
+    result=$(ops agent require "$name")
+    printf '  %s\n' "$result"
+done
+
+# Feed extensions are the agent's to fetch, so nothing is pushed over SSH and
+# later base updates find an image to carry forward. A node with Watchtower but
+# no Chrome enrols healthy and then fails every job it is given.
+for name in $acquire; do
+    printf '== acquiring the %s extension ==\n' "$name"
+    result=$(ops extension-acquire "$name") || {
+        printf '%s\n' "$result" | sed 's/^/  /' >&2
+        printf '%s could not be acquired\n' "$name" >&2
+        exit 1
+    }
+    printf '  %s\n' "$result"
+    case "$result" in
+        *": active on "*) ;;
+        *)
+            printf '%s was not activated\n' "$name" >&2
+            exit 1
+            ;;
+    esac
     result=$(ops agent require "$name")
     printf '  %s\n' "$result"
 done

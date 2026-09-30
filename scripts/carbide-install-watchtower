@@ -19,6 +19,7 @@ Usage: carbide-install-watchtower HOST [options]
   --release TAG      Watchtower release to install, defaults to the newest
                      one with a sysext for the node's CarbideOS version
   --repo OWNER/NAME  defaults to aide-gg/watchtower
+  --no-chrome        skip acquiring Chrome, which every ACE job needs
 
 Any further options are passed to carbide-enroll, for example:
   --credentials FILE  --github-token FILE  --ssh-user USER  --ssh-key FILE
@@ -34,10 +35,12 @@ github_token=dist/secrets/github-token
 ssh_user=ace-mgmt
 ssh_key=keys/admin/ace-mgmt.pub
 timeout=600
+chrome=yes
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --release) release=${2:?}; shift 2 ;;
+        --no-chrome) chrome=no; shift ;;
         --repo) repo=${2:?}; shift 2 ;;
         --credentials) credentials=${2:?}; shift 2 ;;
         --github-token) github_token=${2:?}; shift 2 ;;
@@ -132,6 +135,7 @@ printf '  %s\n' "${image##*/}"
 
 set -- --extension "watchtower=$image" \
     --ssh-user "$ssh_user" --ssh-key "$ssh_key" --timeout "$timeout"
+[ "$chrome" = no ] || set -- "$@" --acquire chrome
 if [ -s "$credentials" ]; then
     set -- "$@" --credentials "$credentials"
 else

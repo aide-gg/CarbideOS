@@ -224,6 +224,33 @@ SYSEXT_ID=chrome
 SYSEXT_VERSION_ID=$chrome_version
 EOF
 
+# carbide-agent will only activate, require or recover an extension that says
+# how to tell it works, and Chrome has no service of its own. Actually running
+# the binary catches an image whose libraries do not match this base, which is
+# the failure a merge alone cannot see. The agent starts it; nothing else does.
+install -d "$root/usr/lib/systemd/system" "$root/usr/lib/carbide/health.d"
+cat >"$root/usr/lib/systemd/system/carbide-chrome-health.service" <<EOF
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Unit]
+Description=Check that the Chrome extension runs on this base
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+DynamicUser=yes
+PrivateTmp=yes
+Environment=HOME=/tmp
+ExecStart=/opt/google/chrome/chrome --version
+EOF
+cat >"$root/usr/lib/carbide/health.d/chrome.conf" <<EOF
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Extension]
+Unit=carbide-chrome-health.service
+ReadyTimeoutSec=30
+StartAttempts=2
+SoakSec=0
+EOF
+
 epoch=$(rpm -qp --qf '%{BUILDTIME}' "$chrome_rpm")
 find "$root" -exec touch -h -d "@$epoch" {} +
 mkfs.erofs --quiet --all-root --all-time -T "$epoch" \
